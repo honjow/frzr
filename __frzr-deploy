@@ -764,13 +764,13 @@ main() {
 			IMG_LIST_STR="$(curl --http1.1 -L -s --connect-timeout 15 -m 15 ${BASE_URL}/sha256sum.txt)"
 		fi
 
-		echo "$IMG_LIST_STR"
+		echo "$IMG_LIST_STR" >&2
 		CHECKSUM_LIST=$(echo "$IMG_LIST_STR" | awk '{print $1}')
 
 		# 筛选包含BRANCH的URL
 		if [ -n "$BRANCH" ]; then
 		    FILTERED_URLS=$(echo "$IMG_LIST_URL" | tr ' ' '\n' | grep -i "\-${BRANCH}\.")
-		    echo "$FILTERED_URLS"
+		    echo "$FILTERED_URLS" >&2
 
 		    # 选择第一个匹配的URL
 		    SELECTED_URL=$(echo "$FILTERED_URLS" | head -n 1)
