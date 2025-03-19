@@ -674,6 +674,7 @@ main() {
 	else
 		REPO=$(echo "${SOURCE}" | cut -f 1 -d ':')
 		CHANNEL=$(echo "${SOURCE}" | cut -f 2 -d ':')
+		BRANCH=$(echo "${SOURCE}" | cut -f 3 -d ':')
 
 		RELEASES_API_URL="https://api.github.com/repos/${REPO}/releases?per_page=100"
 
@@ -757,7 +758,11 @@ main() {
 		fi
 
 		BASE_URL=$(dirname $(echo "${IMG_LIST_URL}" | cut -d' ' -f1))
-		IMG_LIST_STR="$(curl --http1.1 -L -s --connect-timeout 15 -m 15 ${BASE_URL}/sha256sum.txt)"
+		if [ -n "$BRANCH" ]; then
+			IMG_LIST_STR="$(curl --http1.1 -L -s --connect-timeout 15 -m 15 ${BASE_URL}/sha256sum-${BRANCH}.txt)"
+		else
+			IMG_LIST_STR="$(curl --http1.1 -L -s --connect-timeout 15 -m 15 ${BASE_URL}/sha256sum.txt)"
+		fi
 
 		echo "$IMG_LIST_STR"
 		CHECKSUM_LIST=$(echo "$IMG_LIST_STR" | awk '{print $1}')
