@@ -767,6 +767,25 @@ main() {
 		echo "$IMG_LIST_STR"
 		CHECKSUM_LIST=$(echo "$IMG_LIST_STR" | awk '{print $1}')
 
+		# 筛选包含BRANCH的URL
+		if [ -n "$BRANCH" ]; then
+		    FILTERED_URLS=$(echo "$IMG_LIST_URL" | tr ' ' '\n' | grep -i "\-${BRANCH}\.")
+		    echo "$FILTERED_URLS"
+
+		    # 选择第一个匹配的URL
+		    SELECTED_URL=$(echo "$FILTERED_URLS" | head -n 1)
+
+		    if [ -n "$SELECTED_URL" ]; then
+		        IMG_LIST_URL="$SELECTED_URL"
+		    else
+		        echo "警告: 没有找到包含 '$BRANCH' 的URL，使用原始URL列表的第一个URL" >&2
+		        IMG_LIST_URL=$(echo "$IMG_LIST_URL" | cut -d' ' -f1)
+		    fi
+		else
+		    # 如果没有指定BRANCH，使用第一个URL
+		    IMG_LIST_URL=$(echo "$IMG_LIST_URL" | cut -d' ' -f1)
+		fi
+
 		IMG_FILE_NAME=$(basename ${IMG_LIST_URL} | sed 's/-[0-9]*$//')
 		NAME=$(echo "${IMG_FILE_NAME}" | cut -f 1 -d '.')
 		SUBVOL="${DEPLOY_PATH}/${NAME}"
@@ -786,10 +805,11 @@ main() {
 				if [[ -n "$FALLBACK_URL_AL" ]]; then
 					FALLBACK_URL="${FALLBACK_URL_AL}"
 				else
-					FALLBACK_URL_JL=$(get_fallback_url_justlist "${BASE_URL}" "${FILE_NAME}")
-					if [[ -n "$FALLBACK_URL_JL" ]]; then
-						FALLBACK_URL="${FALLBACK_URL_JL}"
-					fi
+					# FALLBACK_URL_JL=$(get_fallback_url_justlist "${BASE_URL}" "${FILE_NAME}")
+					# if [[ -n "$FALLBACK_URL_JL" ]]; then
+					# 	FALLBACK_URL="${FALLBACK_URL_JL}"
+					# fi
+					FALLBACK_URL=""
 				fi
 			fi
 
