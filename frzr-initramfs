@@ -24,6 +24,7 @@ function initramfs_subvol() {
     mount -t proc /proc proc/
     mount -t sysfs /sys sys/
     mount --rbind /dev dev/
+    mount --rbind /etc/mkinitcpio.d etc/mkinitcpio.d/
 
     # Set R/W permissions
     btrfs property set -fts ${SUBVOL} ro false
@@ -52,6 +53,7 @@ EOF
     umount -l ${SUBVOL}/sys
     mount --make-rslave ${SUBVOL}/dev
     umount -l ${SUBVOL}/dev
+    umount -l ${SUBVOL}/etc/mkinitcpio.d
 
 }
 
