@@ -548,6 +548,13 @@ get_env_from_conf() {
 	set +a
 }
 
+function get_branch() {
+    local deployment=$1
+    # chimeraos-48-8_624ba25-cosmic -> cosmic
+    # chimeraos-48-8_624ba25-kde-nv -> kde
+    echo "$deployment" | awk -F '_' '{print $NF}' | awk -F '-' '{print $2}'
+}
+
 main() {
 	if [ $EUID -ne 0 ]; then
 		echo "$(basename $0) must be run as root"
@@ -1002,6 +1009,18 @@ main() {
 
 	# Run frzr-initramfs to create mkinicpio.conf and build an initramfs
 	frzr-initramfs
+
+	# check and clean etc
+    CURRENT_BRANCH=$(get_branch "${CURRENT}")
+	NEW_BRANCH=$(get_branch "${NAME}")
+	if [ "$CURRENT_BRANCH" != "$NEW_BRANCH" ]; then
+        echo "clean-etc: ${CURRENT_BRANCH} -> ${NEW_BRANCH}"
+        if [ -f /usr/share/sk-chos-tool/scripts/etc_repair.sh ]; then
+            /usr/share/sk-chos-tool/scripts/etc_repair.sh
+        else
+            echo "etc_repair.sh not found"
+        fi
+    fi
 
 	rm -f ${MOUNT_PATH}/*.img.*
 
