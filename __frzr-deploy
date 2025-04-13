@@ -961,7 +961,12 @@ main() {
 
 	ADDITIONAL_ARGUMENTS=""
 	if [ -e ${SUBVOL}/usr/lib/frzr.d/bootconfig.conf ]; then
-		ADDITIONAL_ARGUMENTS="$ADDITIONAL_ARGUMENTS $(cat ${SUBVOL}/usr/lib/frzr.d/bootconfig.conf)"
+		# ADDITIONAL_ARGUMENTS="$ADDITIONAL_ARGUMENTS $(cat ${SUBVOL}/usr/lib/frzr.d/bootconfig.conf)"
+		if [ -n "${ADDITIONAL_ARGUMENTS}" ]; then
+			ADDITIONAL_ARGUMENTS="${ADDITIONAL_ARGUMENTS} $(cat ${SUBVOL}/usr/lib/frzr.d/bootconfig.conf)"
+		else
+			ADDITIONAL_ARGUMENTS="$(cat ${SUBVOL}/usr/lib/frzr.d/bootconfig.conf)"
+		fi
 	fi
 
 	# create_swap "${MOUNT_PATH}" "${SUBVOL}"
