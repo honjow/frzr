@@ -3,7 +3,7 @@
 set -e
 
 if [ $EUID -ne 0 ]; then
-	echo "$(basename $0) must be run as root"
+	echo "$(basename "$0") must be run as root"
 	exit 1
 fi
 
@@ -12,23 +12,27 @@ umount ${MOUNT_PATH}/boot/ || true
 umount ${MOUNT_PATH}/ || true
 
 device_list=()
-device_output=`lsblk --list -n -o name,model,size,type | grep disk | tr -s ' ' '\t'`
+device_output=$(lsblk --list -n -o name,model,size,type | grep disk | tr -s ' ' '\t')
 
 while read -r line; do
-	name=/dev/`echo "$line" | cut -f 1`
-	model=`echo "$line" | cut -f 2`
-	size=`echo "$line" | cut -f 3`
-	device_list+=($name)
+	name=/dev/$(echo "$line" | cut -f 1)
+	model=$(echo "$line" | cut -f 2)
+	size=$(echo "$line" | cut -f 3)
+	device_list+=("$name")
 	device_list+=("$model ($size)")
 done <<< "$device_output"
 
-DISK=$(whiptail --nocancel --menu "选择要安装到的磁盘:" 20 50 5 "${device_list[@]}" 3>&1 1>&2 2>&3)
+if [ -n "$2" ]; then
+	DISK=$2
+else
+	DISK=$(whiptail --nocancel --menu "选择要安装到的磁盘:" 20 50 5 "${device_list[@]}" 3>&1 1>&2 2>&3)
+fi
 
 # Checking for existing installation
 
 REPAIR=false
 
-if (lsblk -o label ${DISK} | grep -q frzr_efi); then
+if (lsblk -o label "${DISK}" | grep -q frzr_efi); then
     echo "Existing installation found"
 
     if (whiptail --yesno --yes-button "修复" --no-button "全新安装" "警告: $DISK 似乎已经安装了系统。您想要修复它还是进行全新安装?\n\n注意: 进行全新安装将删除磁盘上的所有内容, 但修复安装将保留您的用户数据。" 13 70); then
@@ -47,18 +51,18 @@ fi
 
 if [ "${REPAIR}" == true ]; then
 
-	mkdir -p ${MOUNT_PATH}
-	INSTALL_MOUNT=$(lsblk -rno "path,label" ${DISK} | grep "frzr_root" | awk '{print $1}')
-	BOOT_EFI=$(lsblk -rno "path,label" ${DISK} | grep "frzr_efi" | awk '{print $1}')
-	mount ${INSTALL_MOUNT} ${MOUNT_PATH}
-	mount -t vfat ${BOOT_EFI} ${MOUNT_PATH}/boot/
-	rm -rf ${MOUNT_PATH}/boot/*
-	bootctl --esp-path=${MOUNT_PATH}/boot/ install
+	mkdir -p "${MOUNT_PATH}"
+	INSTALL_MOUNT=$(lsblk -rno "path,label" "${DISK}" | grep "frzr_root" | awk '{print $1}')
+	BOOT_EFI=$(lsblk -rno "path,label" "${DISK}" | grep "frzr_efi" | awk '{print $1}')
+	mount "${INSTALL_MOUNT}" "${MOUNT_PATH}"
+	mount -t vfat "${BOOT_EFI}" "${MOUNT_PATH}/boot/"
+	rm -rf "${MOUNT_PATH:?}/boot/"*
+	bootctl --esp-path="${MOUNT_PATH}/boot/" install
 
 	echo "deleting subvolume..."
-	btrfs subvolume delete ${MOUNT_PATH}/deployments/* || true
+	btrfs subvolume delete "${MOUNT_PATH}/deployments/*" || true
 	
-	rm -rf ${MOUNT_PATH}/etc/*
+	rm -rf "${MOUNT_PATH:?}/etc/"*
 
 	exit 0
 fi
@@ -75,39 +79,39 @@ fi
 
 USERNAME=gamer
 
-if [ ! -z $1 ]; then
+if [ -n "$1" ]; then
 	USERNAME=$1
 fi
 
 mkdir -p ${MOUNT_PATH}
 
 # create partition table and create and mount the btrfs filesystem
-parted --script ${DISK} \
+parted --script "${DISK}" \
 	mklabel gpt \
 	mkpart primary fat32 1MiB 1024MiB \
 	set 1 esp on \
 	mkpart primary 1024MiB 100%
 
-PART1=$(fdisk -o Device --list ${DISK} | grep "^${DISK}.*1$")
-PART2=$(fdisk -o Device --list ${DISK} | grep "^${DISK}.*2$")
+PART1=$(fdisk -o Device --list "${DISK}" | grep "^${DISK}.*1$")
+PART2=$(fdisk -o Device --list "${DISK}" | grep "^${DISK}.*2$")
 
-mkfs.btrfs -L frzr_root -f ${PART2}
-mount -t btrfs -o nodatacow ${PART2} ${MOUNT_PATH}
+mkfs.btrfs -L frzr_root -f "${PART2}"
+mount -t btrfs -o nodatacow "${PART2}" "${MOUNT_PATH}"
 
-btrfs subvolume create ${MOUNT_PATH}/var
-btrfs subvolume create ${MOUNT_PATH}/home
+btrfs subvolume create "${MOUNT_PATH}/var"
+btrfs subvolume create "${MOUNT_PATH}/home"
 
-mkdir -p ${MOUNT_PATH}/home/${USERNAME}
-chown 1000:1000 ${MOUNT_PATH}/home/${USERNAME}
+mkdir -p "${MOUNT_PATH}/home/${USERNAME}"
+chown 1000:1000 "${MOUNT_PATH}/home/${USERNAME}"
 
-mkdir ${MOUNT_PATH}/boot
-mkdir -p ${MOUNT_PATH}/etc
-mkdir -p ${MOUNT_PATH}/.etc
+mkdir "${MOUNT_PATH}/boot"
+mkdir -p "${MOUNT_PATH}/etc"
+mkdir -p "${MOUNT_PATH}/.etc"
 
 
 # setup boot partition & install bootloader
-mkfs.vfat ${PART1}
-dosfslabel ${PART1} frzr_efi
-mount -t vfat ${PART1} ${MOUNT_PATH}/boot/
-bootctl --esp-path=${MOUNT_PATH}/boot/ install
-parted ${DISK} set 1 boot on
+mkfs.vfat "${PART1}"
+dosfslabel "${PART1}" frzr_efi
+mount -t vfat "${PART1}" "${MOUNT_PATH}/boot/"
+bootctl --esp-path="${MOUNT_PATH}/boot/" install
+parted "${DISK}" set 1 boot on
