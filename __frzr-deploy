@@ -660,8 +660,24 @@ main() {
 
 	if [ "${local_install}" == true ]; then
 		# install from local disk where label is "FRZR_UPDATE"
-		mkdir tmp_source
-		mount -o rw -L FRZR_UPDATE /root/tmp_source
+		mkdir -p /root/tmp_source
+		
+		# get all FRZR_UPDATE devices
+		FRZR_DEVICES=$(lsblk -rno "path,label" | grep "FRZR_UPDATE" | awk '{print $1}')
+		
+		# prefer mapper device, fallback to first device if no mapper found
+		FRZR_DEV=$(echo "$FRZR_DEVICES" | grep "^/dev/mapper/" | head -1)
+		if [ -z "$FRZR_DEV" ]; then
+			FRZR_DEV=$(echo "$FRZR_DEVICES" | head -1)
+		fi
+		
+		if [ -z "$FRZR_DEV" ]; then
+			echo "No FRZR_UPDATE device found"
+			exit 1
+		fi
+		
+		echo "Using device: $FRZR_DEV"
+		mount -o rw "$FRZR_DEV" /root/tmp_source
 
 		# find the matching file
 		if IMG_FILE=$(find /root/tmp_source -maxdepth 1 -type f -regex ".*\.img\(\.tar\.xz\|\.xz\|\.zst\)?$" | head -n1); then
