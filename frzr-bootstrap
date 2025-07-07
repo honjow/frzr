@@ -31,6 +31,10 @@ umount ${MOUNT_PATH}/ || true
 FREE_SPACE_START_GIB=""
 FREE_SPACE_SIZE_GIB=""
 
+# 全局变量记录选择的空闲空间
+SELECTED_FREE_SPACE_START=""
+SELECTED_FREE_SPACE_END=""
+
 ########## 磁盘选择相关函数
 
 function select_disk() {
@@ -188,22 +192,104 @@ function detect_existing_systems() {
 
 function show_system_info() {
 	if [ ${#EXISTING_SYSTEMS[@]} -gt 0 ]; then
-		echo "检测到现有系统: ${EXISTING_SYSTEMS[*]}" >&2	
+		echo "检测到现有系统: ${EXISTING_SYSTEMS[*]}" >&2
 		echo "frzr 将安装到独立分区，不会影响现有系统" >&2
 		echo "" >&2
 	fi
 }
 
-function check_unallocated_space() {
-	# 使用parted获取未分配空间信息，处理GiB/GB兼容性
-	local free_space=$(parted "${DISK}" unit GiB print free 2>/dev/null |
-		grep "Free Space" | tail -1 | awk '{print $3}' | sed -e 's/GiB//' -e 's/GB//')
+function get_all_free_spaces2() {
+	# 获取所有空闲空间，返回格式：start_mib end_mib size_mib
+	parted "${DISK}" unit MiB print free 2>/dev/null |
+		grep "Free Space" |
+		awk '{
+            gsub(/MiB/, "", $1);
+            gsub(/MiB/, "", $2);
+            start = $1;
+            end = $2;
+            size = int(end - start);
+            print start, end, size;
+        }'
+}
 
-	if [ -n "$free_space" ] && [ "${free_space%.*}" -ge 55 ]; then
-		echo "发现${free_space}GiB未分配空间"
+function get_all_free_spaces() {
+	parted "${DISK}" unit B print free 2>/dev/null |
+		grep "Free Space" |
+		while read -r line; do
+			local start_bytes=$(echo "$line" | awk '{print $1}' | sed 's/B//')
+			local end_bytes=$(echo "$line" | awk '{print $2}' | sed 's/B//')
+			# 转换回MiB进行计算
+			local start_mib=$((start_bytes / 1024 / 1024))
+			local end_mib=$((end_bytes / 1024 / 1024))
+			local size_mib=$((end_mib - start_mib))
+			echo "$start_mib $end_mib $size_mib"
+		done
+}
+
+function filter_usable_free_spaces() {
+	local min_size_mib=$((55 * 1024)) # 55GiB = 55 * 1024 MiB
+
+	get_all_free_spaces | while read -r start end size; do
+		if [ "$size" -ge "$min_size_mib" ]; then
+			local size_gib=$((size / 1024))
+			echo "$start $end $size $size_gib"
+		fi
+	done
+}
+
+function select_free_space() {
+	local usable_spaces=()
+
+	# 读取所有可用的空闲空间
+	while read -r start end size size_gib; do
+		usable_spaces+=("${start}-${end}")
+		usable_spaces+=("${size_gib}GiB 空闲空间")
+	done < <(filter_usable_free_spaces)
+
+	if [ ${#usable_spaces[@]} -eq 0 ]; then
+		echo "未找到足够的空闲空间（需要≥55GiB）" >&2
+		return 1
+	elif [ ${#usable_spaces[@]} -eq 2 ]; then
+		echo "只有一个选择，直接使用" >&2
+		# 只有一个选择，直接使用
+		local selected="${usable_spaces[0]}"
+		SELECTED_FREE_SPACE_START=$(echo "$selected" | cut -d'-' -f1)
+		SELECTED_FREE_SPACE_END=$(echo "$selected" | cut -d'-' -f2)
 		return 0
 	else
-		echo "未分配空间不足55GiB"
+		# 多个选择，显示菜单
+		local selected=$(whiptail --menu "选择要使用的空闲空间:" 15 60 5 \
+			"${usable_spaces[@]}" 3>&1 1>&2 2>&3)
+
+		if [ $? -eq 0 ]; then
+			SELECTED_FREE_SPACE_START=$(echo "$selected" | cut -d'-' -f1)
+			SELECTED_FREE_SPACE_END=$(echo "$selected" | cut -d'-' -f2)
+			return 0
+		else
+			return 1
+		fi
+	fi
+}
+
+function get_free_space_boundaries() {
+	if [ -n "$SELECTED_FREE_SPACE_START" ] && [ -n "$SELECTED_FREE_SPACE_END" ]; then
+		echo "$SELECTED_FREE_SPACE_START $SELECTED_FREE_SPACE_END"
+	else
+		# fallback 到原有逻辑
+		local free_info=$(parted "$DISK" unit MiB print free | grep "Free Space" | tail -1)
+		local free_start=$(echo "$free_info" | awk '{print $1}' | sed 's/MiB//')
+		local free_end=$(echo "$free_info" | awk '{print $2}' | sed 's/MiB//')
+		echo "$free_start $free_end"
+	fi
+}
+
+function check_unallocated_space() {
+	if select_free_space; then
+		local size_gib=$(((SELECTED_FREE_SPACE_END - SELECTED_FREE_SPACE_START) / 1024))
+		echo "选择了 ${size_gib}GiB 空闲空间 (${SELECTED_FREE_SPACE_START}MiB - ${SELECTED_FREE_SPACE_END}MiB)"
+		return 0
+	else
+		echo "未找到足够的空闲空间（需要≥55GiB）"
 		return 1
 	fi
 }
@@ -506,7 +592,7 @@ function shrink_selected_partition() {
 
 		# 更新分区表
 		update_partition_table "$partition" "$SHRINK_SIZE_GB"
-		
+
 		# 记录释放空间位置和大小
 		local part_num=$(echo "$partition" | sed 's/.*[^0-9]\([0-9]\+\)$/\1/')
 		FREE_SPACE_START_GIB=$(parted "$DISK" unit GiB print | grep "^ *$part_num " | awk '{print $3}' | sed 's/GiB//')
@@ -546,62 +632,54 @@ function update_partition_table() {
 
 ########## 双系统安装函数
 
-function get_free_space_boundaries() {
-    local free_info=$(parted "$DISK" unit MiB print free | grep "Free Space" | tail -1)
-    local free_start=$(echo "$free_info" | awk '{print $1}' | sed 's/MiB//')
-    local free_end=$(echo "$free_info" | awk '{print $2}' | sed 's/MiB//')
-    
-    echo "$free_start $free_end"
-}
-
 function create_dual_boot_partitions() {
-	local ACTUAL_START_MIB 
+	local ACTUAL_START_MIB
 	local ACTUAL_END_MIB
-	read -r ACTUAL_START_MIB ACTUAL_END_MIB <<< "$(get_free_space_boundaries)"
+	read -r ACTUAL_START_MIB ACTUAL_END_MIB <<<"$(get_free_space_boundaries)"
 	echo >&2 "ACTUAL_START_MIB: $ACTUAL_START_MIB, ACTUAL_END_MIB: $ACTUAL_END_MIB"
 	if [ -n "$ACTUAL_START_MIB" ]; then
 		local efi_end_mib=$((ACTUAL_START_MIB + 1024))
-		
+
 		echo >&2 "在释放空间中创建分区: ${ACTUAL_START_MIB}MiB - ${ACTUAL_END_MIB}MiB"
-		
+
 		# 创建EFI分区
 		if ! parted --script "$DISK" mkpart primary fat32 "${ACTUAL_START_MIB}MiB" "${efi_end_mib}MiB"; then
 			echo "创建EFI分区失败"
 			return 1
 		fi
-		
+
 		# 创建根分区
 		if ! parted --script "$DISK" mkpart primary "${efi_end_mib}MiB" "${ACTUAL_END_MIB}MiB"; then
 			echo "创建根分区失败"
 			return 1
 		fi
-		
+
 		# 重新读取分区表
 		partprobe "$DISK"
 		sleep 1
-		
+
 		# 通过起始位置找到EFI分区编号
 		local efi_part_num=$(parted "$DISK" unit MiB print | awk -v start="$ACTUAL_START_MIB" '$2 ~ start {print $1}')
 		if ! parted "$DISK" set "$efi_part_num" esp on; then
 			echo "设置EFI分区标志失败"
 			return 1
 		fi
-		
+
 	else
 		echo "未找到未分配空间" >&2
 		return 1
 	fi
-	
+
 	# 获取新创建的分区路径
 	if [ -n "$ACTUAL_START_MIB" ]; then
 		# 释放空间情况：通过起始位置找分区
 		local efi_start_mib=$ACTUAL_START_MIB
 		local root_start_mib=$((ACTUAL_START_MIB + 1024))
-		
+
 		# 通过parted找到分区编号，然后构造路径
 		local efi_part_num=$(parted "$DISK" unit MiB print | awk -v start="$efi_start_mib" '$2 ~ start {print $1}')
 		local root_part_num=$(parted "$DISK" unit MiB print | awk -v start="$root_start_mib" '$2 ~ start {print $1}')
-		
+
 		# 构造分区路径
 		if [[ "$DISK" == *"nvme"* ]]; then
 			FRZR_EFI_PART="${DISK}p${efi_part_num}"
@@ -616,7 +694,7 @@ function create_dual_boot_partitions() {
 		FRZR_EFI_PART=$(echo "$all_partitions" | tail -2 | head -1)
 		FRZR_ROOT_PART=$(echo "$all_partitions" | tail -1)
 	fi
-	
+
 	echo "创建的分区:"
 	echo "EFI分区: $FRZR_EFI_PART"
 	echo "根分区: $FRZR_ROOT_PART"
@@ -686,7 +764,7 @@ function dual_boot_install() {
 	# 检查空间
 	if ! check_unallocated_space; then
 		if ! whiptail --yesno \
-			"磁盘没有足够的未分配空间。\n\n是否要缩小现有分区来安装？\n\n(选择'否'将退出并显示手动准备说明)" \
+			"磁盘没有足够的未分配空间。\n\n是否要调整现有分区大小来安装？\n\n(选择'否'将退出并显示手动准备说明)" \
 			10 60 3>&1 1>&2 2>&3; then
 
 			# 简洁的手动说明
@@ -696,13 +774,7 @@ function dual_boot_install() {
 			echo "Linux: gparted 调整分区大小"
 			echo "准备完成后重新运行此脚本"
 			exit 1
-		fi
 
-		if ! whiptail --yesno \
-			"检测到当前磁盘有足够的未分配空间。\n默认会使用当前磁盘的未分配空间来安装。\n\n是否继续？\n\n(选择'否'将退出安装)" \
-			10 60 3>&1 1>&2 2>&3; then
-
-			exit 1
 		fi
 
 		# 执行分区缩小，每一步都检查返回值
@@ -720,6 +792,15 @@ function dual_boot_install() {
 			echo "分区操作失败" >&2
 			exit 1
 		fi
+
+	else
+		if ! whiptail --yesno \
+			"检测到当前磁盘有足够的未分配空间。\n默认会使用当前磁盘的未分配空间来安装。\n\n是否继续？\n\n(选择'否'将退出安装)" \
+			10 60 3>&1 1>&2 2>&3; then
+
+			exit 1
+		fi
+
 	fi
 
 	# 继续安装流程
