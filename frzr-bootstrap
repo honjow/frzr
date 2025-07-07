@@ -325,9 +325,9 @@ function select_shrink_size() {
 	local system_warning=$(detect_system_partition "$SELECTED_PARTITION" "$partition_fstype")
 
 	SIZE_OPTIONS=(
-		"60" "60GiB (基本安装)"
-		"100" "100GiB (标准安装)"
-		"200" "200GiB (大容量安装)"
+		"60" "60GiB (最小安装，不推荐)"
+		"100" "100GiB (常规安装)"
+		"200" "200GiB (推荐)"
 		"all" "*** 删除整个分区 (该分区将完全消失) ***"
 	)
 
