@@ -546,23 +546,32 @@ function update_partition_table() {
 
 ########## 双系统安装函数
 
+function get_free_space_boundaries() {
+    local free_info=$(parted "$DISK" unit MiB print free | grep "Free Space" | tail -1)
+    local free_start=$(echo "$free_info" | awk '{print $1}' | sed 's/MiB//')
+    local free_end=$(echo "$free_info" | awk '{print $2}' | sed 's/MiB//')
+    
+    echo "$free_start $free_end"
+}
+
 function create_dual_boot_partitions() {
-	if [ -n "$FREE_SPACE_START_GIB" ]; then
-		# 在释放空间中创建分区
-		local start_gib=$FREE_SPACE_START_GIB
-		local efi_end_gib=$((start_gib + 1))  # EFI分区1GiB
-		local root_end_gib=$((start_gib + FREE_SPACE_SIZE_GIB))  # 根分区用完剩余空间
+	local ACTUAL_START_MIB 
+	local ACTUAL_END_MIB
+	read -r ACTUAL_START_MIB ACTUAL_END_MIB <<< "$(get_free_space_boundaries)"
+	echo >&2 "ACTUAL_START_MIB: $ACTUAL_START_MIB, ACTUAL_END_MIB: $ACTUAL_END_MIB"
+	if [ -n "$ACTUAL_START_MIB" ]; then
+		local efi_end_mib=$((ACTUAL_START_MIB + 1024))
 		
-		echo "在释放空间中创建分区: ${start_gib}GiB - ${root_end_gib}GiB"
+		echo >&2 "在释放空间中创建分区: ${ACTUAL_START_MIB}MiB - ${ACTUAL_END_MIB}MiB"
 		
 		# 创建EFI分区
-		if ! parted --script "$DISK" mkpart primary fat32 "${start_gib}GiB" "${efi_end_gib}GiB"; then
+		if ! parted --script "$DISK" mkpart primary fat32 "${ACTUAL_START_MIB}MiB" "${efi_end_mib}MiB"; then
 			echo "创建EFI分区失败"
 			return 1
 		fi
 		
 		# 创建根分区
-		if ! parted --script "$DISK" mkpart primary "${efi_end_gib}GiB" "${root_end_gib}GiB"; then
+		if ! parted --script "$DISK" mkpart primary "${efi_end_mib}MiB" "${ACTUAL_END_MIB}MiB"; then
 			echo "创建根分区失败"
 			return 1
 		fi
@@ -572,47 +581,26 @@ function create_dual_boot_partitions() {
 		sleep 1
 		
 		# 通过起始位置找到EFI分区编号
-		local efi_part_num=$(parted "$DISK" unit GiB print | awk -v start="$start_gib" '$2 ~ start {print $1}')
+		local efi_part_num=$(parted "$DISK" unit MiB print | awk -v start="$ACTUAL_START_MIB" '$2 ~ start {print $1}')
 		if ! parted "$DISK" set "$efi_part_num" esp on; then
 			echo "设置EFI分区标志失败"
 			return 1
 		fi
 		
 	else
-		# 在磁盘末尾创建分区（未分配空间情况）
-		local last_partition_end=$(parted "${DISK}" unit s print |
-			grep "^ " | tail -1 | awk '{print $3}' | tr -d 's')
-		
-		local start_sector=$(((last_partition_end + 2048) / 2048 * 2048))
-		local efi_end_sector=$((start_sector + 2097152))
-		
-		if ! parted --script "${DISK}" \
-			mkpart primary fat32 "${start_sector}s" "${efi_end_sector}s" \
-			mkpart primary "${efi_end_sector}s" 100%; then
-			echo "创建分区失败"
-			return 1
-		fi
-		
-		# 设置EFI分区标志
-		local part_count=$(parted "${DISK}" print | grep "^ " | wc -l)
-		if ! parted "${DISK}" set $((part_count - 1)) esp on; then
-			echo "设置EFI分区标志失败"
-			return 1
-		fi
-		
-		partprobe "$DISK"
-		sleep 1
+		echo "未找到未分配空间" >&2
+		return 1
 	fi
 	
 	# 获取新创建的分区路径
-	if [ -n "$FREE_SPACE_START_GIB" ]; then
+	if [ -n "$ACTUAL_START_MIB" ]; then
 		# 释放空间情况：通过起始位置找分区
-		local efi_start_gib=$FREE_SPACE_START_GIB
-		local root_start_gib=$((FREE_SPACE_START_GIB + 1))
+		local efi_start_mib=$ACTUAL_START_MIB
+		local root_start_mib=$((ACTUAL_START_MIB + 1024))
 		
 		# 通过parted找到分区编号，然后构造路径
-		local efi_part_num=$(parted "$DISK" unit GiB print | awk -v start="$efi_start_gib" '$2 ~ start {print $1}')
-		local root_part_num=$(parted "$DISK" unit GiB print | awk -v start="$root_start_gib" '$2 ~ start {print $1}')
+		local efi_part_num=$(parted "$DISK" unit MiB print | awk -v start="$efi_start_mib" '$2 ~ start {print $1}')
+		local root_part_num=$(parted "$DISK" unit MiB print | awk -v start="$root_start_mib" '$2 ~ start {print $1}')
 		
 		# 构造分区路径
 		if [[ "$DISK" == *"nvme"* ]]; then
@@ -635,6 +623,8 @@ function create_dual_boot_partitions() {
 }
 
 function setup_dual_boot_filesystem() {
+	mkdir -p "${MOUNT_PATH}"
+
 	# 创建并格式化分区
 	if ! mkfs.btrfs -L frzr_root -f "${FRZR_ROOT_PART}"; then
 		echo "创建BTRFS文件系统失败"
@@ -696,7 +686,7 @@ function dual_boot_install() {
 	# 检查空间
 	if ! check_unallocated_space; then
 		if ! whiptail --yesno \
-			"磁盘没有足够的未分配空间。\n\n是否要缩小现有分区来安装frzr？\n\n(选择'否'将退出并显示手动准备说明)" \
+			"磁盘没有足够的未分配空间。\n\n是否要缩小现有分区来安装？\n\n(选择'否'将退出并显示手动准备说明)" \
 			10 60 3>&1 1>&2 2>&3; then
 
 			# 简洁的手动说明
@@ -705,7 +695,14 @@ function dual_boot_install() {
 			echo "Windows: 磁盘管理 -> 压缩卷"
 			echo "Linux: gparted 调整分区大小"
 			echo "准备完成后重新运行此脚本"
-			exit 0
+			exit 1
+		fi
+
+		if ! whiptail --yesno \
+			"检测到当前磁盘有足够的未分配空间。\n默认会使用当前磁盘的未分配空间来安装。\n\n是否继续？\n\n(选择'否'将退出安装)" \
+			10 60 3>&1 1>&2 2>&3; then
+
+			exit 1
 		fi
 
 		# 执行分区缩小，每一步都检查返回值
@@ -742,7 +739,7 @@ function dual_boot_install() {
 		exit 1
 	fi
 
-	echo "双系统安装完成" >&2
+	echo "双系统文件系统设置完成" >&2
 }
 
 ########## 主流程
