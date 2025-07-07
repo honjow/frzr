@@ -43,7 +43,7 @@ function select_disk() {
 		echo "使用指定磁盘: $DISK"
 	else
 		device_list=()
-		device_output=$(lsblk --list -n -o name,model,size,type | grep disk | tr -s ' ' '\t')
+		device_output=$(lsblk --list -n -o name,model,size,type | grep disk | grep -v zram | tr -s ' ' '\t')
 
 		while read -r line; do
 			name=/dev/$(echo "$line" | cut -f 1)
@@ -53,7 +53,7 @@ function select_disk() {
 			device_list+=("$model ($size)")
 		done <<<"$device_output"
 
-		DISK=$(whiptail --nocancel --menu "选择要安装到的磁盘:" 20 50 5 "${device_list[@]}" 3>&1 1>&2 2>&3)
+		DISK=$(whiptail --menu "选择要安装到的磁盘:" 20 50 5 "${device_list[@]}" 3>&1 1>&2 2>&3)
 		echo "用户选择磁盘: $DISK"
 	fi
 }
@@ -69,11 +69,22 @@ function check_existing_installation() {
 }
 
 function choose_repair_or_reinstall() {
-	if (whiptail --yesno --yes-button "修复" --no-button "重新安装" "检测到现有的frzr安装。您想要修复它还是重新安装?\n\n修复安装: 保留用户数据，修复引导和系统文件\n重新安装: 进入安装选项，可选择全新安装或双系统安装" 13 70 3>&1 1>&2 2>&3); then
+	local choice=$(whiptail --menu "检测到现有的frzr安装，请选择操作:" 15 70 3 \
+		"repair" "修复安装 - 保留用户数据，修复引导和系统文件" \
+		"reinstall" "重新安装 - 进入安装选项，可选择全新安装或双系统安装" \
+		3>&1 1>&2 2>&3)
+
+	case "$choice" in
+	"repair")
 		echo "repair"
-	else
+		;;
+	"reinstall")
 		echo "reinstall"
-	fi
+		;;
+	"*")
+		echo "cancel"
+		;;
+	esac
 }
 
 function choose_install_type() {
@@ -364,14 +375,14 @@ function list_shrinkable_partitions() {
 	while read -r line; do
 		device_name=$(echo "$line" | awk '{print $1}')
 		fstype=$(echo "$line" | awk '{print $2}')
-		size=$(echo "$line" | awk '{print $3}')
+		size_bytes=$(echo "$line" | awk '{print $3}')
+
+		size=$((size_bytes / 1024 / 1024 / 1024))
 
 		# 构造完整的设备路径
 		device="/dev/$device_name"
-
 		# 只要分区≥55GiB就可以选择
-		size_gb=$(echo "$size" | sed 's/G//' | cut -d. -f1)
-		if [ "$size_gb" -lt 55 ]; then
+		if [[ -z "$size" ]] || [[ "$size" -lt 55 ]]; then
 			continue
 		fi
 
@@ -382,10 +393,10 @@ function list_shrinkable_partitions() {
 			local system_warning=$(detect_system_partition "$device" "$fstype")
 
 			SHRINKABLE_PARTITIONS+=("$device")
-			SHRINKABLE_PARTITIONS+=("$fstype ($size)$system_warning")
+			SHRINKABLE_PARTITIONS+=("$fstype (${size}GB)$system_warning")
 			;;
 		esac
-	done < <(lsblk -rno NAME,FSTYPE,SIZE "${DISK}" | grep -v "^${DISK##*/}$")
+	done < <(lsblk -rno NAME,FSTYPE,SIZE "${DISK}" --bytes | grep -v "^${DISK##*/}$")
 }
 
 function select_partition_to_shrink() {
@@ -868,6 +879,10 @@ function main() {
 		"reinstall")
 			# 进入常规安装类型选择
 			handle_installation_choice "$username" "$install_type"
+			;;
+		"*")
+			echo "取消安装" >&2
+			exit 1
 			;;
 		esac
 	else
