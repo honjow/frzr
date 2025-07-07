@@ -1,5 +1,5 @@
 #! /bin/bash
-# shellcheck disable=SC2155
+# shellcheck disable=SC2155,SC2001
 
 set -e
 
@@ -189,14 +189,14 @@ function show_system_info() {
 
 function check_unallocated_space() {
 	# 使用parted获取未分配空间信息
-	local free_space=$(parted "${DISK}" unit GB print free 2>/dev/null |
-		grep "Free Space" | tail -1 | awk '{print $3}' | sed 's/GB//')
+	local free_space=$(parted "${DISK}" unit GiB print free 2>/dev/null |
+		grep "Free Space" | tail -1 | awk '{print $3}' | sed 's/GiB//')
 
 	if [ -n "$free_space" ] && [ "${free_space%.*}" -ge 55 ]; then
-		echo "发现${free_space}GB未分配空间"
+		echo "发现${free_space}GiB未分配空间"
 		return 0
 	else
-		echo "未分配空间不足55GB"
+		echo "未分配空间不足55GiB"
 		return 1
 	fi
 }
@@ -276,7 +276,7 @@ function list_shrinkable_partitions() {
 		# 构造完整的设备路径
 		device="/dev/$device_name"
 
-		# 只要分区≥55GB就可以选择
+		# 只要分区≥55GiB就可以选择
 		size_gb=$(echo "$size" | sed 's/G//' | cut -d. -f1)
 		if [ "$size_gb" -lt 55 ]; then
 			continue
@@ -299,7 +299,7 @@ function select_partition_to_shrink() {
 	list_shrinkable_partitions
 
 	if [ ${#SHRINKABLE_PARTITIONS[@]} -eq 0 ]; then
-		whiptail --msgbox "没有找到可以操作的分区 (需要≥55GB的ntfs/ext4/btrfs分区)" 10 60
+		whiptail --msgbox "没有找到可以操作的分区 (需要≥55GiB的ntfs/ext4/btrfs分区)" 10 60
 		return 1
 	fi
 
@@ -424,7 +424,7 @@ function shrink_selected_partition() {
 
 	else
 		# 缩小分区逻辑
-		local display_size="${SHRINK_SIZE_GB}GB"
+		local display_size="${SHRINK_SIZE_GB}GiB"
 
 		if ! whiptail --yesno \
 			"确认缩小分区?\n\n分区: $partition ($size, $fstype)\n释放空间: $display_size\n\n警告: 此操作有风险，请确保已备份重要数据!" \
@@ -436,41 +436,42 @@ function shrink_selected_partition() {
 		# 获取当前分区大小
 		local current_size_gb=$(echo "$size" | sed 's/G//' | cut -d. -f1)
 		local target_size_gb=$((current_size_gb - SHRINK_SIZE_GB))
+		local target_size_bytes=$((target_size_gb * 1024 * 1024 * 1024))
 
 		if [ "$target_size_gb" -le 10 ]; then
-			echo "错误：缩小后的分区太小（<10GB），操作取消"
+			echo "错误：缩小后的分区太小（<10GiB），操作取消"
 			return 1
 		fi
 
 		# 执行缩小
 		case "$fstype" in
 		"ntfs")
-			echo "缩小NTFS分区到 ${target_size_gb}GB..."
-			if ! ntfsresize --size "${target_size_gb}G" "$partition"; then
+			echo "缩小NTFS分区到 ${target_size_gb}GiB..."
+			if ! ntfsresize --size "${target_size_bytes}" "$partition"; then
 				echo "NTFS分区缩小失败"
 				return 1
 			fi
 			;;
 		"ext4")
-			echo "缩小ext4分区到 ${target_size_gb}GB..."
+			echo "缩小ext4分区到 ${target_size_gb}GiB..."
 			if ! e2fsck -f "$partition"; then
 				echo "ext4文件系统检查失败"
 				return 1
 			fi
-			if ! resize2fs "$partition" "${target_size_gb}G"; then
+			if ! resize2fs "$partition" "${target_size_bytes}"; then
 				echo "ext4分区缩小失败"
 				return 1
 			fi
 			;;
 		"btrfs")
-			echo "缩小BTRFS分区到 ${target_size_gb}GB..."
+			echo "缩小BTRFS分区到 ${target_size_gb}GiB..."
 			local mountpoint=$(findmnt -n -o TARGET "$partition" 2>/dev/null)
 			if [ -z "$mountpoint" ]; then
 				# 如果未挂载，临时挂载
 				local temp_mount="/tmp/btrfs_resize_$$"
 				mkdir -p "$temp_mount"
 				if mount -t btrfs "$partition" "$temp_mount"; then
-					if ! btrfs filesystem resize "${target_size_gb}G" "$temp_mount"; then
+					if ! btrfs filesystem resize "${target_size_bytes}" "$temp_mount"; then
 						echo "BTRFS分区缩小失败"
 						umount "$temp_mount"
 						rmdir "$temp_mount"
@@ -484,7 +485,7 @@ function shrink_selected_partition() {
 					return 1
 				fi
 			else
-				if ! btrfs filesystem resize "${target_size_gb}G" "$mountpoint"; then
+				if ! btrfs filesystem resize "${target_size_bytes}" "$mountpoint"; then
 					echo "BTRFS分区缩小失败"
 					return 1
 				fi
@@ -637,7 +638,7 @@ function dual_boot_install() {
 
 			# 简洁的手动说明
 			echo ""
-			echo "请手动准备至少55GB未分配空间："
+			echo "请手动准备至少55GiB未分配空间："
 			echo "Windows: 磁盘管理 -> 压缩卷"
 			echo "Linux: gparted 调整分区大小"
 			echo "准备完成后重新运行此脚本"
