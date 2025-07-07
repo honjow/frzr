@@ -3,6 +3,9 @@
 
 set -e
 
+# 初始化文件描述符3为stdout，供whiptail重定向使用
+exec 3>&1
+
 # 脚本用法:
 # ./frzr-bootstrap [USERNAME] [DISK] [INSTALL_TYPE]
 #
@@ -62,7 +65,7 @@ function check_existing_installation() {
 }
 
 function choose_repair_or_reinstall() {
-	if (whiptail --yesno --yes-button "修复" --no-button "重新安装" "检测到现有的frzr安装。您想要修复它还是重新安装?\n\n修复安装: 保留用户数据，修复引导和系统文件\n重新安装: 进入安装选项，可选择全新安装或双系统安装" 13 70); then
+	if (whiptail --yesno --yes-button "修复" --no-button "重新安装" "检测到现有的frzr安装。您想要修复它还是重新安装?\n\n修复安装: 保留用户数据，修复引导和系统文件\n重新安装: 进入安装选项，可选择全新安装或双系统安装" 13 70 3>&1 1>&2 2>&3); then
 		echo "repair"
 	else
 		echo "reinstall"
@@ -118,8 +121,8 @@ function fresh_install() {
 
 	echo "=== 全新安装模式 ==="
 
-	if ! (whiptail --yesno "警告: $DISK 将被格式化。磁盘上的所有数据将丢失。您是否要继续?" 10 50); then
-		whiptail --msgbox "安装已取消" 10 50
+	if ! (whiptail --yesno "警告: $DISK 将被格式化。磁盘上的所有数据将丢失。您是否要继续?" 10 50 3>&1 1>&2 2>&3); then
+		whiptail --msgbox "安装已取消" 10 50 3>&1 1>&2 2>&3
 		echo "installation aborted"
 		exit 1
 	fi
@@ -303,7 +306,7 @@ function select_partition_to_shrink() {
 	list_shrinkable_partitions
 
 	if [ ${#SHRINKABLE_PARTITIONS[@]} -eq 0 ]; then
-		whiptail --msgbox "没有找到可以操作的分区 (需要≥55GiB的ntfs/ext4/btrfs分区)" 10 60
+		whiptail --msgbox "没有找到可以操作的分区 (需要≥55GiB的ntfs/ext4/btrfs分区)" 10 60 3>&1 1>&2 2>&3
 		return 1
 	fi
 
@@ -368,7 +371,7 @@ function select_shrink_size() {
 		warning_text+="• 此操作完全不可逆\n\n"
 		warning_text+="您确定要继续吗？"
 
-		if ! whiptail --yesno "$warning_text" 18 60; then
+		if ! whiptail --yesno "$warning_text" 18 60 3>&1 1>&2 2>&3; then
 			echo "用户取消危险操作"
 			return 1
 		fi
@@ -377,7 +380,7 @@ function select_shrink_size() {
 		if [ -n "$system_warning" ]; then
 			if ! whiptail --yesno \
 				"最后警告\n\n您即将删除系统分区，这将导致:\n• 计算机无法启动\n• 系统完全不可用\n• 所有程序和数据丢失\n\n您真的要继续吗？" \
-				12 60; then
+				12 60 3>&1 1>&2 2>&3; then
 				echo "用户取消危险操作"
 				return 1
 			fi
@@ -405,7 +408,7 @@ function shrink_selected_partition() {
 		# 最终确认
 		if ! whiptail --yesno \
 			"*** 最终确认 - 不可逆操作 ***\n\n分区: $partition ($size, $fstype)\n\n操作: 完全删除该分区\n\n该分区上的所有数据将永久丢失！\n\n您确定要执行吗？" \
-			15 60; then
+			15 60 3>&1 1>&2 2>&3; then
 			echo "用户取消危险操作"
 			return 1
 		fi
@@ -432,7 +435,7 @@ function shrink_selected_partition() {
 
 		if ! whiptail --yesno \
 			"确认缩小分区?\n\n分区: $partition ($size, $fstype)\n释放空间: $display_size\n\n警告: 此操作有风险，请确保已备份重要数据!" \
-			12 60; then
+			12 60 3>&1 1>&2 2>&3; then
 			echo "用户取消缩小操作"
 			return 1
 		fi
@@ -690,7 +693,7 @@ function dual_boot_install() {
 	if ! check_unallocated_space; then
 		if ! whiptail --yesno \
 			"磁盘没有足够的未分配空间。\n\n是否要缩小现有分区来安装frzr？\n\n(选择'否'将退出并显示手动准备说明)" \
-			10 60; then
+			10 60 3>&1 1>&2 2>&3; then
 
 			# 简洁的手动说明
 			echo ""
