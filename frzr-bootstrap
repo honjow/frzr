@@ -1,55 +1,97 @@
 #! /bin/bash
+# shellcheck disable=SC2155
 
 set -e
+
+# 脚本用法:
+# ./frzr-bootstrap [USERNAME] [DISK] [INSTALL_TYPE]
+#
+# 参数说明:
+# USERNAME: 用户名 (默认: gamer)
+# DISK: 目标磁盘 (如不指定则显示选择菜单)
+# INSTALL_TYPE: 安装类型
+#   - fresh: 全新安装 (格式化整个磁盘)
+#   - dual: 双系统安装 (保留现有系统)
+#   - 如不指定则显示选择菜单
 
 if [ $EUID -ne 0 ]; then
 	echo "$(basename "$0") must be run as root"
 	exit 1
 fi
 
+# 全局变量
 MOUNT_PATH=/tmp/frzr_root
 umount ${MOUNT_PATH}/boot/ || true
 umount ${MOUNT_PATH}/ || true
 
-device_list=()
-device_output=$(lsblk --list -n -o name,model,size,type | grep disk | tr -s ' ' '\t')
+########## 磁盘选择相关函数
 
-while read -r line; do
-	name=/dev/$(echo "$line" | cut -f 1)
-	model=$(echo "$line" | cut -f 2)
-	size=$(echo "$line" | cut -f 3)
-	device_list+=("$name")
-	device_list+=("$model ($size)")
-done <<< "$device_output"
+function select_disk() {
+	if [ -n "$1" ]; then
+		DISK=$1
+		echo "使用指定磁盘: $DISK"
+	else
+		device_list=()
+		device_output=$(lsblk --list -n -o name,model,size,type | grep disk | tr -s ' ' '\t')
 
-if [ -n "$2" ]; then
-	DISK=$2
-else
-	DISK=$(whiptail --nocancel --menu "选择要安装到的磁盘:" 20 50 5 "${device_list[@]}" 3>&1 1>&2 2>&3)
-fi
+		while read -r line; do
+			name=/dev/$(echo "$line" | cut -f 1)
+			model=$(echo "$line" | cut -f 2)
+			size=$(echo "$line" | cut -f 3)
+			device_list+=("$name")
+			device_list+=("$model ($size)")
+		done <<<"$device_output"
 
-# Checking for existing installation
+		DISK=$(whiptail --nocancel --menu "选择要安装到的磁盘:" 20 50 5 "${device_list[@]}" 3>&1 1>&2 2>&3)
+		echo "用户选择磁盘: $DISK"
+	fi
+}
 
-REPAIR=false
+function check_existing_installation() {
+	if (lsblk -o label "${DISK}" | grep -q frzr_efi); then
+		echo "检测到现有frzr安装"
+		return 0
+	else
+		echo "未检测到现有frzr安装"
+		return 1
+	fi
+}
 
-if (lsblk -o label "${DISK}" | grep -q frzr_efi); then
-    echo "Existing installation found"
+function choose_repair_or_reinstall() {
+	if (whiptail --yesno --yes-button "修复" --no-button "重新安装" "检测到现有的frzr安装。您想要修复它还是重新安装?\n\n修复安装: 保留用户数据，修复引导和系统文件\n重新安装: 进入安装选项，可选择全新安装或双系统安装" 13 70); then
+		echo "repair"
+	else
+		echo "reinstall"
+	fi
+}
 
-    if (whiptail --yesno --yes-button "修复" --no-button "全新安装" "警告: $DISK 似乎已经安装了系统。您想要修复它还是进行全新安装?\n\n注意: 进行全新安装将删除磁盘上的所有内容, 但修复安装将保留您的用户数据。" 13 70); then
-        echo "User chose to do a repair install"
-        REPAIR=true
-    else
-        echo "User chose to do a clean install"
-    fi
-else
-    echo "Existing installation not found"
-fi
+function choose_install_type() {
+	if [ -n "$1" ]; then
+		echo "$1"
+	else
+		# 检测现有系统
+		detect_existing_systems
+		show_system_info
 
+		# 显示安装类型选择
+		local install_type=$(whiptail --menu "选择安装类型:" 15 60 2 \
+			"fresh" "全新安装 (格式化整个磁盘)" \
+			"dual" "双系统安装 (保留现有系统)" \
+			3>&1 1>&2 2>&3)
 
+		if [ $? -ne 0 ]; then
+			echo "安装已取消"
+			exit 1
+		fi
 
-########## Doing a repair install
+		echo "$install_type"
+	fi
+}
 
-if [ "${REPAIR}" == true ]; then
+########## 原有功能函数封装
+
+function repair_install() {
+	echo "=== 修复安装模式 ==="
 
 	mkdir -p "${MOUNT_PATH}"
 	INSTALL_MOUNT=$(lsblk -rno "path,label" "${DISK}" | grep "frzr_root" | awk '{print $1}')
@@ -61,57 +103,632 @@ if [ "${REPAIR}" == true ]; then
 
 	echo "deleting subvolume..."
 	btrfs subvolume delete "${MOUNT_PATH}/deployments/*" || true
-	
+
 	rm -rf "${MOUNT_PATH:?}/etc/"*
 
-	exit 0
-fi
+	echo "修复安装完成"
+}
 
+function fresh_install() {
+	local username="$1"
 
+	echo "=== 全新安装模式 ==="
 
-########## Doing a fresh install
+	if ! (whiptail --yesno "警告: $DISK 将被格式化。磁盘上的所有数据将丢失。您是否要继续?" 10 50); then
+		whiptail --msgbox "安装已取消" 10 50
+		echo "installation aborted"
+		exit 1
+	fi
 
-if ! (whiptail --yesno "警告: $DISK 将被格式化。磁盘上的所有数据将丢失。您是否要继续?" 10 50); then
-	whiptail --msgbox "安装已取消" 10 50
-	echo "installation aborted"
-	exit 1
-fi
+	USERNAME=${username:-gamer}
 
-USERNAME=gamer
+	mkdir -p ${MOUNT_PATH}
 
-if [ -n "$1" ]; then
-	USERNAME=$1
-fi
+	# create partition table and create and mount the btrfs filesystem
+	parted --script "${DISK}" \
+		mklabel gpt \
+		mkpart primary fat32 1MiB 1024MiB \
+		set 1 esp on \
+		mkpart primary 1024MiB 100%
 
-mkdir -p ${MOUNT_PATH}
+	PART1=$(fdisk -o Device --list "${DISK}" | grep "^${DISK}.*1$")
+	PART2=$(fdisk -o Device --list "${DISK}" | grep "^${DISK}.*2$")
 
-# create partition table and create and mount the btrfs filesystem
-parted --script "${DISK}" \
-	mklabel gpt \
-	mkpart primary fat32 1MiB 1024MiB \
-	set 1 esp on \
-	mkpart primary 1024MiB 100%
+	mkfs.btrfs -L frzr_root -f "${PART2}"
+	mount -t btrfs -o nodatacow "${PART2}" "${MOUNT_PATH}"
 
-PART1=$(fdisk -o Device --list "${DISK}" | grep "^${DISK}.*1$")
-PART2=$(fdisk -o Device --list "${DISK}" | grep "^${DISK}.*2$")
+	btrfs subvolume create "${MOUNT_PATH}/var"
+	btrfs subvolume create "${MOUNT_PATH}/home"
 
-mkfs.btrfs -L frzr_root -f "${PART2}"
-mount -t btrfs -o nodatacow "${PART2}" "${MOUNT_PATH}"
+	mkdir -p "${MOUNT_PATH}/home/${USERNAME}"
+	chown 1000:1000 "${MOUNT_PATH}/home/${USERNAME}"
 
-btrfs subvolume create "${MOUNT_PATH}/var"
-btrfs subvolume create "${MOUNT_PATH}/home"
+	mkdir "${MOUNT_PATH}/boot"
+	mkdir -p "${MOUNT_PATH}/etc"
+	mkdir -p "${MOUNT_PATH}/.etc"
 
-mkdir -p "${MOUNT_PATH}/home/${USERNAME}"
-chown 1000:1000 "${MOUNT_PATH}/home/${USERNAME}"
+	# setup boot partition & install bootloader
+	mkfs.vfat "${PART1}"
+	dosfslabel "${PART1}" frzr_efi
+	mount -t vfat "${PART1}" "${MOUNT_PATH}/boot/"
+	bootctl --esp-path="${MOUNT_PATH}/boot/" install
+	parted "${DISK}" set 1 boot on
 
-mkdir "${MOUNT_PATH}/boot"
-mkdir -p "${MOUNT_PATH}/etc"
-mkdir -p "${MOUNT_PATH}/.etc"
+	echo "全新安装完成"
+}
 
+########## 双系统检测函数
 
-# setup boot partition & install bootloader
-mkfs.vfat "${PART1}"
-dosfslabel "${PART1}" frzr_efi
-mount -t vfat "${PART1}" "${MOUNT_PATH}/boot/"
-bootctl --esp-path="${MOUNT_PATH}/boot/" install
-parted "${DISK}" set 1 boot on
+function detect_existing_systems() {
+	EXISTING_SYSTEMS=()
+
+	# 检测Windows
+	if lsblk -f | grep -q "ntfs"; then
+		EXISTING_SYSTEMS+=("Windows")
+	fi
+
+	# 检测Linux
+	if lsblk -f | grep -qE "(ext4|btrfs|xfs)" &&
+		lsblk -o label | grep -vq "frzr_"; then
+		EXISTING_SYSTEMS+=("Linux")
+	fi
+
+	# 检测macOS
+	if lsblk -f | grep -q "apfs"; then
+		EXISTING_SYSTEMS+=("macOS")
+	fi
+}
+
+function show_system_info() {
+	if [ ${#EXISTING_SYSTEMS[@]} -gt 0 ]; then
+		echo "检测到现有系统: ${EXISTING_SYSTEMS[*]}"
+		echo "frzr 将安装到独立分区，不会影响现有系统"
+		echo ""
+	fi
+}
+
+function check_unallocated_space() {
+	# 使用parted获取未分配空间信息
+	local free_space=$(parted "${DISK}" unit GB print free 2>/dev/null |
+		grep "Free Space" | tail -1 | awk '{print $3}' | sed 's/GB//')
+
+	if [ -n "$free_space" ] && [ "${free_space%.*}" -ge 55 ]; then
+		echo "发现${free_space}GB未分配空间"
+		return 0
+	else
+		echo "未分配空间不足55GB"
+		return 1
+	fi
+}
+
+########## 分区操作函数
+
+function cleanup_temp_mount() {
+	local temp_mount="$1"
+	umount "$temp_mount" 2>/dev/null || true
+	rmdir "$temp_mount" 2>/dev/null || true
+}
+
+function detect_system_partition() {
+	local partition="$1"
+	local fstype="$2"
+	local temp_mount="/tmp/check_partition_$$"
+
+	# 创建临时挂载点
+	mkdir -p "$temp_mount"
+
+	# 尝试挂载分区进行检查
+	local mount_success=false
+	case "$fstype" in
+	"ntfs")
+		if mount -t ntfs -o ro,noatime "$partition" "$temp_mount" 2>/dev/null; then
+			mount_success=true
+		fi
+		;;
+	"ext4")
+		if mount -t ext4 -o ro,noatime "$partition" "$temp_mount" 2>/dev/null; then
+			mount_success=true
+		fi
+		;;
+	"btrfs")
+		if mount -t btrfs -o ro,noatime "$partition" "$temp_mount" 2>/dev/null; then
+			mount_success=true
+		fi
+		;;
+	esac
+
+	local warning=""
+	if [ "$mount_success" = true ]; then
+		# 检查Windows系统分区
+		if [ "$fstype" = "ntfs" ]; then
+			if [ -d "$temp_mount/Windows" ] && [ -d "$temp_mount/Program Files" ]; then
+				warning=" *** Windows系统分区 ***"
+			elif [ -d "$temp_mount/Windows" ]; then
+				warning=" *** 疑似Windows分区 ***"
+			fi
+		fi
+
+		# 检查Linux系统分区
+		if [ "$fstype" = "ext4" ] || [ "$fstype" = "btrfs" ]; then
+			if [ -d "$temp_mount/etc" ] && [ -d "$temp_mount/usr" ] && [ -d "$temp_mount/var" ]; then
+				warning=" *** Linux系统分区 ***"
+			elif [ -d "$temp_mount/etc" ]; then
+				warning=" *** 疑似Linux分区 ***"
+			fi
+		fi
+	fi
+
+	# 清理临时挂载点
+	cleanup_temp_mount "$temp_mount"
+
+	echo "$warning"
+}
+
+function list_shrinkable_partitions() {
+	SHRINKABLE_PARTITIONS=()
+
+	# 获取所有分区信息
+	while read -r line; do
+		device_name=$(echo "$line" | awk '{print $1}')
+		fstype=$(echo "$line" | awk '{print $2}')
+		size=$(echo "$line" | awk '{print $3}')
+
+		# 构造完整的设备路径
+		device="/dev/$device_name"
+
+		# 只要分区≥55GB就可以选择
+		size_gb=$(echo "$size" | sed 's/G//' | cut -d. -f1)
+		if [ "$size_gb" -lt 55 ]; then
+			continue
+		fi
+
+		# 检查是否支持操作
+		case "$fstype" in
+		"ntfs" | "ext4" | "btrfs")
+			# 检测是否为系统分区
+			local system_warning=$(detect_system_partition "$device" "$fstype")
+
+			SHRINKABLE_PARTITIONS+=("$device")
+			SHRINKABLE_PARTITIONS+=("$fstype ($size)$system_warning")
+			;;
+		esac
+	done < <(lsblk -o NAME,FSTYPE,SIZE "${DISK}" | grep -v "^${DISK##*/}$")
+}
+
+function select_partition_to_shrink() {
+	list_shrinkable_partitions
+
+	if [ ${#SHRINKABLE_PARTITIONS[@]} -eq 0 ]; then
+		whiptail --msgbox "没有找到可以操作的分区 (需要≥55GB的ntfs/ext4/btrfs分区)" 10 60
+		return 1
+	fi
+
+	# 显示分区选择菜单
+	SELECTED_PARTITION=$(whiptail --menu "选择要操作的分区:" 15 70 5 \
+		"${SHRINKABLE_PARTITIONS[@]}" 3>&1 1>&2 2>&3)
+
+	if [ $? -ne 0 ]; then
+		echo "用户取消选择"
+		return 1
+	fi
+
+	echo "用户选择分区: $SELECTED_PARTITION"
+}
+
+function select_shrink_size() {
+	# 获取选定分区的详细信息
+	local partition_info=$(lsblk -o NAME,SIZE,FSTYPE "$SELECTED_PARTITION" | tail -1)
+	local partition_size=$(echo "$partition_info" | awk '{print $2}')
+	local partition_fstype=$(echo "$partition_info" | awk '{print $3}')
+
+	# 检查是否为系统分区
+	local system_warning=$(detect_system_partition "$SELECTED_PARTITION" "$partition_fstype")
+
+	SIZE_OPTIONS=(
+		"60" "60GiB (基本安装)"
+		"100" "100GiB (标准安装)"
+		"200" "200GiB (大容量安装)"
+		"all" "*** 删除整个分区 (该分区将完全消失) ***"
+	)
+
+	# 如果是系统分区，在菜单标题中显示警告
+	local menu_title="选择操作 - 分区: $SELECTED_PARTITION ($partition_size)$system_warning"
+
+	SHRINK_SIZE=$(whiptail --menu "$menu_title" 16 70 4 \
+		"${SIZE_OPTIONS[@]}" 3>&1 1>&2 2>&3)
+
+	if [ $? -ne 0 ]; then
+		echo "用户取消选择"
+		return 1
+	fi
+
+	case "$SHRINK_SIZE" in
+	"60") SHRINK_SIZE_GB=60 ;;
+	"100") SHRINK_SIZE_GB=100 ;;
+	"200") SHRINK_SIZE_GB=200 ;;
+	"all")
+		# 显示分区详细信息并警告
+		local warning_text="*** 极度危险警告 ***\n\n您选择了'删除整个分区':\n\n"
+		warning_text+="分区: $SELECTED_PARTITION\n"
+		warning_text+="大小: $partition_size\n"
+		warning_text+="文件系统: $partition_fstype\n"
+
+		if [ -n "$system_warning" ]; then
+			warning_text+="\n*** 警告: 这是一个系统分区! ***\n"
+			warning_text+="删除此分区将导致系统无法启动!\n"
+		fi
+
+		warning_text+="\n此操作将:\n"
+		warning_text+="• 完全删除上述分区\n"
+		warning_text+="• 该分区上的所有数据将永久丢失\n"
+		warning_text+="• 此操作完全不可逆\n\n"
+		warning_text+="您确定要继续吗？"
+
+		if ! whiptail --yesno "$warning_text" 18 60; then
+			echo "用户取消危险操作"
+			return 1
+		fi
+
+		# 系统分区需要额外确认
+		if [ -n "$system_warning" ]; then
+			if ! whiptail --yesno \
+				"最后警告\n\n您即将删除系统分区，这将导致:\n• 计算机无法启动\n• 系统完全不可用\n• 所有程序和数据丢失\n\n您真的要继续吗？" \
+				12 60; then
+				echo "用户取消危险操作"
+				return 1
+			fi
+		fi
+
+		SHRINK_SIZE_GB="delete_entire_partition"
+		;;
+	esac
+
+	echo "用户选择: ${SHRINK_SIZE_GB}"
+}
+
+function shrink_selected_partition() {
+	local partition="$SELECTED_PARTITION"
+	local fstype=$(lsblk -no fstype "$partition")
+	local size=$(lsblk -no size "$partition")
+
+	# 检查分区是否存在
+	if ! lsblk "$partition" >/dev/null 2>&1; then
+		echo "错误：分区 $partition 不存在"
+		return 1
+	fi
+
+	if [ "$SHRINK_SIZE_GB" = "delete_entire_partition" ]; then
+		# 最终确认
+		if ! whiptail --yesno \
+			"*** 最终确认 - 不可逆操作 ***\n\n分区: $partition ($size, $fstype)\n\n操作: 完全删除该分区\n\n该分区上的所有数据将永久丢失！\n\n您确定要执行吗？" \
+			15 60; then
+			echo "用户取消危险操作"
+			return 1
+		fi
+
+		echo "删除整个分区: $partition ($size, $fstype)"
+
+		# 获取分区号
+		local part_num=$(echo "$partition" | sed 's/.*[^0-9]\([0-9]\+\)$/\1/')
+
+		# 卸载分区（如果已挂载）
+		umount "$partition" 2>/dev/null || true
+
+		# 删除分区
+		if ! parted "$DISK" rm "$part_num"; then
+			echo "删除分区失败"
+			return 1
+		fi
+
+		echo "分区已完全删除"
+
+	else
+		# 缩小分区逻辑
+		local display_size="${SHRINK_SIZE_GB}GB"
+
+		if ! whiptail --yesno \
+			"确认缩小分区?\n\n分区: $partition ($size, $fstype)\n释放空间: $display_size\n\n警告: 此操作有风险，请确保已备份重要数据!" \
+			12 60; then
+			echo "用户取消缩小操作"
+			return 1
+		fi
+
+		# 获取当前分区大小
+		local current_size_gb=$(echo "$size" | sed 's/G//' | cut -d. -f1)
+		local target_size_gb=$((current_size_gb - SHRINK_SIZE_GB))
+
+		if [ "$target_size_gb" -le 10 ]; then
+			echo "错误：缩小后的分区太小（<10GB），操作取消"
+			return 1
+		fi
+
+		# 执行缩小
+		case "$fstype" in
+		"ntfs")
+			echo "缩小NTFS分区到 ${target_size_gb}GB..."
+			if ! ntfsresize --size "${target_size_gb}G" "$partition"; then
+				echo "NTFS分区缩小失败"
+				return 1
+			fi
+			;;
+		"ext4")
+			echo "缩小ext4分区到 ${target_size_gb}GB..."
+			if ! e2fsck -f "$partition"; then
+				echo "ext4文件系统检查失败"
+				return 1
+			fi
+			if ! resize2fs "$partition" "${target_size_gb}G"; then
+				echo "ext4分区缩小失败"
+				return 1
+			fi
+			;;
+		"btrfs")
+			echo "缩小BTRFS分区到 ${target_size_gb}GB..."
+			local mountpoint=$(findmnt -n -o TARGET "$partition" 2>/dev/null)
+			if [ -z "$mountpoint" ]; then
+				# 如果未挂载，临时挂载
+				local temp_mount="/tmp/btrfs_resize_$$"
+				mkdir -p "$temp_mount"
+				if mount -t btrfs "$partition" "$temp_mount"; then
+					if ! btrfs filesystem resize "${target_size_gb}G" "$temp_mount"; then
+						echo "BTRFS分区缩小失败"
+						umount "$temp_mount"
+						rmdir "$temp_mount"
+						return 1
+					fi
+					umount "$temp_mount"
+					rmdir "$temp_mount"
+				else
+					echo "无法挂载BTRFS分区"
+					rmdir "$temp_mount"
+					return 1
+				fi
+			else
+				if ! btrfs filesystem resize "${target_size_gb}G" "$mountpoint"; then
+					echo "BTRFS分区缩小失败"
+					return 1
+				fi
+			fi
+			;;
+		esac
+
+		# 更新分区表
+		update_partition_table "$partition" "$SHRINK_SIZE_GB"
+	fi
+}
+
+function update_partition_table() {
+	local partition="$1"
+	local shrink_size="$2"
+
+	# 获取分区号
+	local part_num=$(echo "$partition" | sed 's/.*[^0-9]\([0-9]\+\)$/\1/')
+
+	# 获取当前分区信息
+	local current_end=$(parted "$DISK" unit s print | grep "^ *$part_num " | awk '{print $3}')
+	local shrink_sectors=$((shrink_size * 1024 * 1024 * 1024 / 512))
+	local new_end=$(echo "$current_end" | sed 's/s//')
+	new_end=$((new_end - shrink_sectors))
+
+	# 调整分区表
+	if ! parted "$DISK" resizepart "$part_num" "${new_end}s"; then
+		echo "分区表更新失败"
+		return 1
+	fi
+
+	# 重新读取分区表
+	partprobe "$DISK"
+
+	# 等待分区表更新
+	sleep 1
+
+	echo "分区表已更新"
+}
+
+########## 双系统安装函数
+
+function create_dual_boot_partitions() {
+	# 获取最后一个分区的结束位置
+	local last_partition_end=$(parted "${DISK}" unit s print |
+		grep "^ " | tail -1 | awk '{print $3}' | tr -d 's')
+
+	# 计算新分区的起始位置（对齐到1MB边界）
+	local start_sector=$(((last_partition_end + 2048) / 2048 * 2048))
+
+	# 创建frzr的EFI分区 (1GB)
+	local efi_end_sector=$((start_sector + 2097152)) # 1GB = 2097152 sectors
+
+	# 创建frzr的根分区 (剩余空间)
+	if ! parted --script "${DISK}" \
+		mkpart primary fat32 "${start_sector}s" "${efi_end_sector}s" \
+		mkpart primary "${efi_end_sector}s" 100%; then
+		echo "创建分区失败"
+		return 1
+	fi
+
+	# 设置EFI分区标志
+	local part_count=$(parted "${DISK}" print | grep "^ " | wc -l)
+	if ! parted "${DISK}" set $((part_count - 1)) esp on; then
+		echo "设置EFI分区标志失败"
+		return 1
+	fi
+
+	# 重新读取分区表
+	partprobe "$DISK"
+	sleep 1
+
+	# 获取新创建的分区路径 - 通过分区号获取
+	local all_partitions=$(lsblk -rno "path" "${DISK}" | grep -E "p?[0-9]+$" | sort)
+	local part_count=$(echo "$all_partitions" | wc -l)
+
+	# 倒数第二个分区是EFI分区，最后一个是根分区
+	FRZR_EFI_PART=$(echo "$all_partitions" | tail -2 | head -1)
+	FRZR_ROOT_PART=$(echo "$all_partitions" | tail -1)
+
+	echo "创建的分区:"
+	echo "EFI分区: $FRZR_EFI_PART"
+	echo "根分区: $FRZR_ROOT_PART"
+}
+
+function setup_dual_boot_filesystem() {
+	# 创建并格式化分区
+	if ! mkfs.btrfs -L frzr_root -f "${FRZR_ROOT_PART}"; then
+		echo "创建BTRFS文件系统失败"
+		return 1
+	fi
+
+	if ! mkfs.vfat "${FRZR_EFI_PART}"; then
+		echo "创建EFI文件系统失败"
+		return 1
+	fi
+
+	if ! dosfslabel "${FRZR_EFI_PART}" frzr_efi; then
+		echo "设置EFI分区标签失败"
+		return 1
+	fi
+
+	# 挂载分区
+	if ! mount -t btrfs -o nodatacow "${FRZR_ROOT_PART}" "${MOUNT_PATH}"; then
+		echo "挂载根分区失败"
+		return 1
+	fi
+
+	mkdir "${MOUNT_PATH}/boot"
+	if ! mount -t vfat "${FRZR_EFI_PART}" "${MOUNT_PATH}/boot/"; then
+		echo "挂载EFI分区失败"
+		return 1
+	fi
+
+	# 创建BTRFS子卷
+	if ! btrfs subvolume create "${MOUNT_PATH}/var"; then
+		echo "创建var子卷失败"
+		return 1
+	fi
+
+	if ! btrfs subvolume create "${MOUNT_PATH}/home"; then
+		echo "创建home子卷失败"
+		return 1
+	fi
+
+	# 设置目录结构
+	mkdir -p "${MOUNT_PATH}/home/${USERNAME}"
+	chown 1000:1000 "${MOUNT_PATH}/home/${USERNAME}"
+	mkdir -p "${MOUNT_PATH}/etc"
+	mkdir -p "${MOUNT_PATH}/.etc"
+
+	echo "双系统文件系统设置完成"
+}
+
+function dual_boot_install() {
+	local username="$1"
+	USERNAME=${username:-gamer}
+
+	echo "=== 双系统安装模式 ==="
+
+	# 检测和显示现有系统
+	detect_existing_systems
+	show_system_info
+
+	# 检查空间
+	if ! check_unallocated_space; then
+		if ! whiptail --yesno \
+			"磁盘没有足够的未分配空间。\n\n是否要缩小现有分区来安装frzr？\n\n(选择'否'将退出并显示手动准备说明)" \
+			10 60; then
+
+			# 简洁的手动说明
+			echo ""
+			echo "请手动准备至少55GB未分配空间："
+			echo "Windows: 磁盘管理 -> 压缩卷"
+			echo "Linux: gparted 调整分区大小"
+			echo "准备完成后重新运行此脚本"
+			exit 0
+		fi
+
+		# 执行分区缩小，每一步都检查返回值
+		if ! select_partition_to_shrink; then
+			echo "分区选择失败"
+			exit 1
+		fi
+
+		if ! select_shrink_size; then
+			echo "大小选择失败"
+			exit 1
+		fi
+
+		if ! shrink_selected_partition; then
+			echo "分区操作失败"
+			exit 1
+		fi
+	fi
+
+	# 继续安装流程
+	if ! create_dual_boot_partitions; then
+		echo "创建分区失败"
+		exit 1
+	fi
+
+	if ! setup_dual_boot_filesystem; then
+		echo "文件系统设置失败"
+		exit 1
+	fi
+
+	# 安装bootloader
+	if ! bootctl --esp-path="${MOUNT_PATH}/boot/" install; then
+		echo "bootloader安装失败"
+		exit 1
+	fi
+
+	echo "双系统安装完成"
+}
+
+########## 主流程
+
+function handle_installation_choice() {
+	local username="$1"
+	local install_type="$2"
+
+	# 选择安装类型
+	local chosen_type=$(choose_install_type "$install_type")
+	case "$chosen_type" in
+	"fresh")
+		fresh_install "$username"
+		;;
+	"dual")
+		dual_boot_install "$username"
+		;;
+	*)
+		echo "无效的安装类型: $chosen_type"
+		exit 1
+		;;
+	esac
+}
+
+function main() {
+	local username="$1"
+	local disk="$2"
+	local install_type="$3"
+
+	# 1. 选择磁盘
+	select_disk "$disk"
+
+	# 2. 检查现有安装
+	if check_existing_installation; then
+		# 现有frzr安装 - 修复或重新安装
+		local choice=$(choose_repair_or_reinstall)
+		case "$choice" in
+		"repair")
+			repair_install
+			;;
+		"reinstall")
+			# 进入常规安装类型选择
+			handle_installation_choice "$username" "$install_type"
+			;;
+		esac
+	else
+		# 新安装 - 选择安装类型
+		handle_installation_choice "$username" "$install_type"
+	fi
+}
+
+# 执行主流程
+main "$1" "$2" "$3"
