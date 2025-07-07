@@ -1,7 +1,7 @@
 #! /bin/bash
 # shellcheck disable=SC2155,SC2001
 
-set -e
+set -xe
 
 # 初始化文件描述符3为stdout，供whiptail重定向使用
 exec 3>&1
@@ -188,9 +188,9 @@ function detect_existing_systems() {
 
 function show_system_info() {
 	if [ ${#EXISTING_SYSTEMS[@]} -gt 0 ]; then
-		echo "检测到现有系统: ${EXISTING_SYSTEMS[*]}"
-		echo "frzr 将安装到独立分区，不会影响现有系统"
-		echo ""
+		echo "检测到现有系统: ${EXISTING_SYSTEMS[*]}" >&2	
+		echo "frzr 将安装到独立分区，不会影响现有系统" >&2
+		echo "" >&2
 	fi
 }
 
@@ -299,7 +299,7 @@ function list_shrinkable_partitions() {
 			SHRINKABLE_PARTITIONS+=("$fstype ($size)$system_warning")
 			;;
 		esac
-	done < <(lsblk -o NAME,FSTYPE,SIZE "${DISK}" | grep -v "^${DISK##*/}$")
+	done < <(lsblk -rno NAME,FSTYPE,SIZE "${DISK}" | grep -v "^${DISK##*/}$")
 }
 
 function select_partition_to_shrink() {
@@ -706,39 +706,39 @@ function dual_boot_install() {
 
 		# 执行分区缩小，每一步都检查返回值
 		if ! select_partition_to_shrink; then
-			echo "分区选择失败"
+			echo "分区选择失败" >&2
 			exit 1
 		fi
 
 		if ! select_shrink_size; then
-			echo "大小选择失败"
+			echo "大小选择失败" >&2
 			exit 1
 		fi
 
 		if ! shrink_selected_partition; then
-			echo "分区操作失败"
+			echo "分区操作失败" >&2
 			exit 1
 		fi
 	fi
 
 	# 继续安装流程
 	if ! create_dual_boot_partitions; then
-		echo "创建分区失败"
+		echo "创建分区失败" >&2
 		exit 1
 	fi
 
 	if ! setup_dual_boot_filesystem; then
-		echo "文件系统设置失败"
+		echo "文件系统设置失败" >&2
 		exit 1
 	fi
 
 	# 安装bootloader
 	if ! bootctl --esp-path="${MOUNT_PATH}/boot/" install; then
-		echo "bootloader安装失败"
+		echo "bootloader安装失败" >&2
 		exit 1
 	fi
 
-	echo "双系统安装完成"
+	echo "双系统安装完成" >&2
 }
 
 ########## 主流程
@@ -747,17 +747,21 @@ function handle_installation_choice() {
 	local username="$1"
 	local install_type="$2"
 
+	echo >&2 "handle_installation_choice username: $username, install_type: $install_type"
+
 	# 选择安装类型
 	local chosen_type=$(choose_install_type "$install_type")
 	case "$chosen_type" in
 	"fresh")
+		echo "全新安装" >&2
 		fresh_install "$username"
 		;;
 	"dual")
+		echo "双系统安装" >&2
 		dual_boot_install "$username"
 		;;
 	*)
-		echo "无效的安装类型: $chosen_type"
+		echo "无效的安装类型: $chosen_type" >&2
 		exit 1
 		;;
 	esac
