@@ -454,7 +454,11 @@ function shrink_selected_partition() {
 		case "$fstype" in
 		"ntfs")
 			echo "缩小NTFS分区到 ${target_size_gb}GiB..."
-			if ! ntfsresize --size "${target_size_bytes}" "$partition"; then
+			if ! ntfsresize --check "$partition"; then
+				echo "NTFS文件系统检查失败"
+				return 1
+			fi
+			if ! ntfsresize -f --size "${target_size_bytes}" "$partition"; then
 				echo "NTFS分区缩小失败"
 				return 1
 			fi
@@ -465,7 +469,7 @@ function shrink_selected_partition() {
 				echo "ext4文件系统检查失败"
 				return 1
 			fi
-			if ! resize2fs "$partition" "${target_size_bytes}"; then
+			if ! resize2fs -f "$partition" "${target_size_bytes}"; then
 				echo "ext4分区缩小失败"
 				return 1
 			fi
@@ -526,7 +530,7 @@ function update_partition_table() {
 	new_end=$((new_end - shrink_sectors))
 
 	# 调整分区表
-	if ! parted "$DISK" resizepart "$part_num" "${new_end}s"; then
+	if ! parted --script "$DISK" resizepart "$part_num" "${new_end}s"; then
 		echo "分区表更新失败"
 		return 1
 	fi
