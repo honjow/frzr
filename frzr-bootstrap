@@ -24,6 +24,10 @@ MOUNT_PATH=/tmp/frzr_root
 umount ${MOUNT_PATH}/boot/ || true
 umount ${MOUNT_PATH}/ || true
 
+# 全局变量，用于记录释放空间位置
+FREE_SPACE_START_GIB=""
+FREE_SPACE_SIZE_GIB=""
+
 ########## 磁盘选择相关函数
 
 function select_disk() {
@@ -188,9 +192,9 @@ function show_system_info() {
 }
 
 function check_unallocated_space() {
-	# 使用parted获取未分配空间信息
+	# 使用parted获取未分配空间信息，处理GiB/GB兼容性
 	local free_space=$(parted "${DISK}" unit GiB print free 2>/dev/null |
-		grep "Free Space" | tail -1 | awk '{print $3}' | sed 's/GiB//')
+		grep "Free Space" | tail -1 | awk '{print $3}' | sed -e 's/GiB//' -e 's/GB//')
 
 	if [ -n "$free_space" ] && [ "${free_space%.*}" -ge 55 ]; then
 		echo "发现${free_space}GiB未分配空间"
@@ -495,6 +499,13 @@ function shrink_selected_partition() {
 
 		# 更新分区表
 		update_partition_table "$partition" "$SHRINK_SIZE_GB"
+		
+		# 记录释放空间位置和大小
+		local part_num=$(echo "$partition" | sed 's/.*[^0-9]\([0-9]\+\)$/\1/')
+		FREE_SPACE_START_GIB=$(parted "$DISK" unit GiB print | grep "^ *$part_num " | awk '{print $3}' | sed 's/GiB//')
+		FREE_SPACE_SIZE_GIB=$SHRINK_SIZE_GB
+
+		echo "释放空间: ${FREE_SPACE_START_GIB}GiB 起始，大小 ${FREE_SPACE_SIZE_GIB}GiB"
 	fi
 }
 
@@ -529,43 +540,88 @@ function update_partition_table() {
 ########## 双系统安装函数
 
 function create_dual_boot_partitions() {
-	# 获取最后一个分区的结束位置
-	local last_partition_end=$(parted "${DISK}" unit s print |
-		grep "^ " | tail -1 | awk '{print $3}' | tr -d 's')
-
-	# 计算新分区的起始位置（对齐到1MB边界）
-	local start_sector=$(((last_partition_end + 2048) / 2048 * 2048))
-
-	# 创建frzr的EFI分区 (1GB)
-	local efi_end_sector=$((start_sector + 2097152)) # 1GB = 2097152 sectors
-
-	# 创建frzr的根分区 (剩余空间)
-	if ! parted --script "${DISK}" \
-		mkpart primary fat32 "${start_sector}s" "${efi_end_sector}s" \
-		mkpart primary "${efi_end_sector}s" 100%; then
-		echo "创建分区失败"
-		return 1
+	if [ -n "$FREE_SPACE_START_GIB" ]; then
+		# 在释放空间中创建分区
+		local start_gib=$FREE_SPACE_START_GIB
+		local efi_end_gib=$((start_gib + 1))  # EFI分区1GiB
+		local root_end_gib=$((start_gib + FREE_SPACE_SIZE_GIB))  # 根分区用完剩余空间
+		
+		echo "在释放空间中创建分区: ${start_gib}GiB - ${root_end_gib}GiB"
+		
+		# 创建EFI分区
+		if ! parted --script "$DISK" mkpart primary fat32 "${start_gib}GiB" "${efi_end_gib}GiB"; then
+			echo "创建EFI分区失败"
+			return 1
+		fi
+		
+		# 创建根分区
+		if ! parted --script "$DISK" mkpart primary "${efi_end_gib}GiB" "${root_end_gib}GiB"; then
+			echo "创建根分区失败"
+			return 1
+		fi
+		
+		# 重新读取分区表
+		partprobe "$DISK"
+		sleep 1
+		
+		# 通过起始位置找到EFI分区编号
+		local efi_part_num=$(parted "$DISK" unit GiB print | awk -v start="$start_gib" '$2 ~ start {print $1}')
+		if ! parted "$DISK" set "$efi_part_num" esp on; then
+			echo "设置EFI分区标志失败"
+			return 1
+		fi
+		
+	else
+		# 在磁盘末尾创建分区（未分配空间情况）
+		local last_partition_end=$(parted "${DISK}" unit s print |
+			grep "^ " | tail -1 | awk '{print $3}' | tr -d 's')
+		
+		local start_sector=$(((last_partition_end + 2048) / 2048 * 2048))
+		local efi_end_sector=$((start_sector + 2097152))
+		
+		if ! parted --script "${DISK}" \
+			mkpart primary fat32 "${start_sector}s" "${efi_end_sector}s" \
+			mkpart primary "${efi_end_sector}s" 100%; then
+			echo "创建分区失败"
+			return 1
+		fi
+		
+		# 设置EFI分区标志
+		local part_count=$(parted "${DISK}" print | grep "^ " | wc -l)
+		if ! parted "${DISK}" set $((part_count - 1)) esp on; then
+			echo "设置EFI分区标志失败"
+			return 1
+		fi
+		
+		partprobe "$DISK"
+		sleep 1
 	fi
-
-	# 设置EFI分区标志
-	local part_count=$(parted "${DISK}" print | grep "^ " | wc -l)
-	if ! parted "${DISK}" set $((part_count - 1)) esp on; then
-		echo "设置EFI分区标志失败"
-		return 1
+	
+	# 获取新创建的分区路径
+	if [ -n "$FREE_SPACE_START_GIB" ]; then
+		# 释放空间情况：通过起始位置找分区
+		local efi_start_gib=$FREE_SPACE_START_GIB
+		local root_start_gib=$((FREE_SPACE_START_GIB + 1))
+		
+		# 通过parted找到分区编号，然后构造路径
+		local efi_part_num=$(parted "$DISK" unit GiB print | awk -v start="$efi_start_gib" '$2 ~ start {print $1}')
+		local root_part_num=$(parted "$DISK" unit GiB print | awk -v start="$root_start_gib" '$2 ~ start {print $1}')
+		
+		# 构造分区路径
+		if [[ "$DISK" == *"nvme"* ]]; then
+			FRZR_EFI_PART="${DISK}p${efi_part_num}"
+			FRZR_ROOT_PART="${DISK}p${root_part_num}"
+		else
+			FRZR_EFI_PART="${DISK}${efi_part_num}"
+			FRZR_ROOT_PART="${DISK}${root_part_num}"
+		fi
+	else
+		# 未分配空间情况：确实是最后两个分区
+		local all_partitions=$(lsblk -rno "path" "${DISK}" | grep -E "p?[0-9]+$" | sort)
+		FRZR_EFI_PART=$(echo "$all_partitions" | tail -2 | head -1)
+		FRZR_ROOT_PART=$(echo "$all_partitions" | tail -1)
 	fi
-
-	# 重新读取分区表
-	partprobe "$DISK"
-	sleep 1
-
-	# 获取新创建的分区路径 - 通过分区号获取
-	local all_partitions=$(lsblk -rno "path" "${DISK}" | grep -E "p?[0-9]+$" | sort)
-	local part_count=$(echo "$all_partitions" | wc -l)
-
-	# 倒数第二个分区是EFI分区，最后一个是根分区
-	FRZR_EFI_PART=$(echo "$all_partitions" | tail -2 | head -1)
-	FRZR_ROOT_PART=$(echo "$all_partitions" | tail -1)
-
+	
 	echo "创建的分区:"
 	echo "EFI分区: $FRZR_EFI_PART"
 	echo "根分区: $FRZR_ROOT_PART"
