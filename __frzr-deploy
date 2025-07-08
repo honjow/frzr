@@ -1,4 +1,5 @@
 #! /bin/bash
+# shellcheck disable=SC2207,SC2001,SC2086,SC2004,SC2155,SC2002,SC1091,SC1090
 
 set -e
 set -o pipefail
@@ -79,7 +80,7 @@ get_img_url() {
 						.browser_download_url'
 			)
 
-			if [ $(date -d $testing_release_date +%s) -le $(date -d $stable_release_date +%s) ]; then
+			if [ "$(date -d $testing_release_date +%s)" -le "$(date -d $stable_release_date +%s)" ]; then
 				result=$stable_download_url
 			else
 				result=$testing_url
@@ -505,10 +506,10 @@ get_fallback_url_justlist() {
 		fallback_url=""
 		# get the fallback url from the fallback api
 		file_info=$(curl --http1.1 -L -s -d "{}" -H "Content-Type:application/json" "${fallback_api_url}${img_file_name}")
-		if [[ ! -z "$file_info" ]]; then
+		if [[ -n "$file_info" ]]; then
 			fallback_file_id=$(echo "$file_info" | jq -r '.msg | first | .fileId' 2>/dev/null)
 			fallback_user=$(echo "$file_info" | jq -r '.msg | first | .user' 2>/dev/null)
-			if [[ ! -z "$fallback_file_id" && "$fallback_file_id" != "null" ]]; then
+			if [[ -n "$fallback_file_id" && "$fallback_file_id" != "null" ]]; then
 				fallback_url="${fallback_file_url}${img_file_name}"
 				# fallback_url="${fallback_base}/file/${fallback_user}/?id=${fallback_file_id}"
 			fi
@@ -576,7 +577,7 @@ main() {
 			FRZR_STEAM_PROGRESS=1
 			shift
 			;;
-		-* | --*)
+		--* | -*)
 			echo "Unknown argument $1"
 			exit 1
 			;;
@@ -632,8 +633,8 @@ main() {
 		if [ -n "${TO_DELETE}" ]; then
 			for deployment in ${TO_DELETE}; do
 				echo "deleting ${deployment}..."
-				rm -rf ${MOUNT_PATH}/boot/${deployment} || true
-				btrfs subvolume delete ${DEPLOY_PATH}/${deployment} || true
+				rm -rf "${MOUNT_PATH}/boot/${deployment}" || true
+				btrfs subvolume delete "${DEPLOY_PATH}/${deployment}" || true
 			done
 		fi
 
@@ -641,7 +642,7 @@ main() {
 			# if multiple boot entries are found, delete all of them
 			for boot_entry in ${TO_DELETE_BOOT}; do
 				echo "deleting boot entry ${boot_entry}..."
-				rm -rf ${MOUNT_PATH}/boot/${boot_entry} || true
+				rm -rf "${MOUNT_PATH}/boot/${boot_entry}" || true
 			done
 		fi
 
@@ -780,7 +781,7 @@ main() {
 			exit 1
 		fi
 
-		BASE_URL=$(dirname $(echo "${IMG_LIST_URL}" | cut -d' ' -f1))
+		BASE_URL=$(dirname "$(echo "${IMG_LIST_URL}" | cut -d' ' -f1)")
 		if [ -n "$BRANCH" ]; then
 			IMG_LIST_STR="$(curl --http1.1 -L -s --connect-timeout 15 -m 15 ${BASE_URL}/sha256sum-${BRANCH}.txt)"
 		else
@@ -988,7 +989,7 @@ main() {
 	# create_swap "${MOUNT_PATH}" "${SUBVOL}"
 	SWAP_ARGUMENTS=""
 	if [ -f ${MOUNT_PATH}/swap/swapfile ]; then
-		resume="resume=PARTUUID=$(lsblk -no PARTUUID $(mount | grep " ${MOUNT_PATH} " | cut -d' ' -f1))"
+		resume="resume=PARTUUID=$(lsblk -no PARTUUID "$(mount | grep " ${MOUNT_PATH} " | cut -d' ' -f1)")"
 		resume_offset="resume_offset=$(btrfs inspect-internal map-swapfile -r ${MOUNT_PATH}/swap/swapfile)"
 		SWAP_ARGUMENTS="${resume} ${resume_offset}"
 	fi
