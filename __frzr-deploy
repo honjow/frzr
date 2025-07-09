@@ -662,18 +662,27 @@ main() {
 	if [ "${local_install}" == true ]; then
 		# install from local disk where label is "FRZR_UPDATE"
 		mkdir -p /root/tmp_source
+		if mountpoint -q /root/tmp_source; then
+			umount /root/tmp_source
+		fi
 		
 		# get all FRZR_UPDATE devices
 		FRZR_DEVICES=$(lsblk -rno "path,label" | grep "FRZR_UPDATE" | awk '{print $1}')
+		if [ -z "$FRZR_DEVICES" ]; then
+			echo "No FRZR_UPDATE device found" >&2
+			exit 1
+		fi
 		
 		# prefer mapper device, fallback to first device if no mapper found
-		FRZR_DEV=$(echo "$FRZR_DEVICES" | grep "^/dev/mapper/" | head -1)
-		if [ -z "$FRZR_DEV" ]; then
+		if echo "$FRZR_DEVICES" | grep -q "^/dev/mapper/"; then
+			FRZR_DEV=$(echo "$FRZR_DEVICES" | grep "^/dev/mapper/" | head -1)
+		else
+			echo "No mapper device found, use the first device" >&2
 			FRZR_DEV=$(echo "$FRZR_DEVICES" | head -1)
 		fi
 		
 		if [ -z "$FRZR_DEV" ]; then
-			echo "No FRZR_UPDATE device found"
+			echo "No FRZR_UPDATE device found" >&2
 			exit 1
 		fi
 		
