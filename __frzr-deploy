@@ -581,7 +581,7 @@ main() {
 			echo "Unknown argument $1"
 			exit 1
 			;;
-		*)                               # preserve positional arguments
+		*)  # preserve positional arguments
 			FRZR_PARAMS="${FRZR_PARAMS}$1 " # Use trailing space for the match below
 			shift
 			;;
@@ -649,8 +649,10 @@ main() {
 		rm -f ${MOUNT_PATH}/boot/*.img.tmp || true
 	fi
 
-	if [ ! -z "$FRZR_SOURCE" ] && [ "$FRZR_SOURCE" != " " ] && [ $FRZR_CHECK_UPDATE -eq 0 ] && [ $FRZR_STEAM_PROGRESS -eq 0 ]; then
-		echo "$FRZR_SOURCE" >"${MOUNT_PATH}/source"
+	if [ -n "$FRZR_SOURCE" ] && [ "$FRZR_SOURCE" != " " ] && [ $FRZR_CHECK_UPDATE -eq 0 ] && [ $FRZR_STEAM_PROGRESS -eq 0 ]; then
+		if [[ ! "$FRZR_SOURCE" =~ \.img(\.tar\.xz|\.xz|\.zst)?$ ]]; then
+			echo "$FRZR_SOURCE" >"${MOUNT_PATH}/source"
+		fi
 	fi
 
 	if [ -e "${MOUNT_PATH}/source" ]; then
