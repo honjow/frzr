@@ -626,10 +626,68 @@ function update_partition_table() {
 	local new_end=$(echo "$current_end" | sed 's/s//')
 	new_end=$((new_end - shrink_sectors))
 
-	# 调整分区表
-	if ! parted --script "$DISK" resizepart "$part_num" "${new_end}s"; then
-		echo "分区表更新失败"
+	# 检查计算结果是否合理
+	if [ "$new_end" -le 0 ]; then
+		echo "错误: 分区太小，无法缩小 ${shrink_size}GiB"
 		return 1
+	fi
+
+	# 调整分区表 - 三层回退策略
+	local success=false
+
+	# 方法1: 优先使用 sfdisk (最佳方案)
+	if command -v sfdisk >/dev/null 2>&1; then
+		echo "尝试使用 sfdisk 调整分区表..."
+		# 获取当前分区信息
+		local current_info=$(sfdisk --list "$DISK" 2>/dev/null | grep "^${partition}[[:space:]]" | head -1)
+		if [ -n "$current_info" ]; then
+			local current_start=$(echo "$current_info" | awk '{print $2}')
+			local current_sectors=$(echo "$current_info" | awk '{print $4}')
+			local new_sectors=$((current_sectors - shrink_sectors))
+			
+			# 检查新大小是否合理
+			if [ "$new_sectors" -le 0 ]; then
+				echo "错误: 分区太小，无法缩小 ${shrink_size}GiB，sfdisk 方法跳过"
+			elif echo "$part_num : start=$current_start, size=$new_sectors" | sfdisk --force "$DISK" 2>/dev/null; then
+				echo "sfdisk 方法成功"
+				success=true
+			else
+				echo "sfdisk 方法失败，尝试下一种方法"
+			fi
+		else
+			echo "无法获取分区信息，sfdisk 方法跳过"
+		fi
+	fi
+
+	# 方法2: 使用 expect + parted (备用方案)
+	if [ "$success" = false ] && command -v expect >/dev/null 2>&1; then
+		echo "尝试使用 expect + parted 调整分区表..."
+		if expect -c "
+		spawn parted $DISK resizepart $part_num ${new_end}s
+		expect {
+			\"确定要继续吗*\" { send \"yes\r\" }
+			\"Are you sure you want to continue*\" { send \"yes\r\" }
+			\"continue?*\" { send \"yes\r\" }
+		}
+		expect eof
+		" 2>/dev/null; then
+			echo "expect + parted 方法成功"
+			success=true
+		else
+			echo "expect + parted 方法失败，尝试最后一种方法"
+		fi
+	fi
+
+	# 方法3: 使用 parted -s -f (保底方案)
+	if [ "$success" = false ]; then
+		echo "尝试使用 parted --script --fix 调整分区表..."
+		if parted --script --fix "$DISK" resizepart "$part_num" "${new_end}s" 2>/dev/null; then
+			echo "parted script 方法成功"
+			success=true
+		else
+			echo "所有自动化方法都失败，分区表更新失败"
+			return 1
+		fi
 	fi
 
 	# 重新读取分区表
