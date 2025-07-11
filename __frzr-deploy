@@ -941,6 +941,12 @@ main() {
 		exit 1
 	fi
 
+	current_deploys_array=($(btrfs subvolume list ${MOUNT_PATH} | grep "deployments/chimeraos" | awk '{print $9}'))
+	for current_deploy in "${current_deploys_array[@]}"; do
+		echo "current_deploy: ${current_deploy}, remove it..." >&2
+		btrfs subvolume delete "${MOUNT_PATH}/${current_deploy}" || true
+	done
+
 	if [[ "${IMG_FILE##*.}" == "img" ]]; then
 		btrfs receive --quiet ${DEPLOY_PATH} <${IMG_FILE}
 	elif [[ "${IMG_FILE##*.}" == "zst" ]]; then
