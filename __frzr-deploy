@@ -946,11 +946,16 @@ main() {
 		exit 1
 	fi
 
-	current_deploys_array=($(btrfs subvolume list ${MOUNT_PATH} | grep "deployments/chimeraos" | awk '{print $9}'))
-	for current_deploy in "${current_deploys_array[@]}"; do
-		echo "current_deploy: ${current_deploy}, remove it..." >&2
-		btrfs subvolume delete "${MOUNT_PATH}/${current_deploy}" || true
-	done
+	# 先检查是否存在匹配项
+	if btrfs subvolume list ${MOUNT_PATH} 2>/dev/null | grep -q "deployments/chimeraos"; then
+		current_deploys_array=($(btrfs subvolume list ${MOUNT_PATH} | grep "deployments/chimeraos" | awk '{print $9}'))
+		for current_deploy in "${current_deploys_array[@]}"; do
+			echo "current_deploy: ${current_deploy}, remove it..." >&2
+			btrfs subvolume delete "${MOUNT_PATH}/${current_deploy}" || true
+		done
+	else
+		echo "没有找到需要删除的旧部署" >&2
+	fi
 
 	if [[ "${IMG_FILE##*.}" == "img" ]]; then
 		btrfs receive --quiet ${DEPLOY_PATH} <${IMG_FILE}
