@@ -900,7 +900,7 @@ main() {
 						--checksum=sha-256="${CHECKSUM}" --auto-file-renaming=false --allow-overwrite=true \
 						--console-log-level=warn --stderr=true -o "${FILE_NAME}" -d "${MOUNT_PATH}" "${SUB_IMG_URL}" 2>&1 |
 						grep --line-buffered -oP '\d+(?=%)' | clean_progress_loop $max_progress $SER $TOTAL |
-						whiptail --gauge "下载系统镜像 (${NAME}) " 10 50 0
+						whiptail --gauge "下载系统镜像 (${NAME}) " 10 50 0 3>&1 1>&2 2>&3
 				fi
 			else
 				if [ $FRZR_STEAM_PROGRESS -eq 1 ]; then
@@ -918,7 +918,7 @@ main() {
 					curl --connect-timeout 15 --http1.1 -# -L -o "${SUB_IMG_FILE}" -C - "${SUB_IMG_URL}" 2>&1 |
 						stdbuf -oL tr '\r' '\n' | grep --line-buffered -oP '[0-9]*+(?=.[0-9])' |
 						clean_progress_loop $max_progress $SER $TOTAL |
-						whiptail --gauge "下载系统镜像 (${NAME})" 10 50 0
+						whiptail --gauge "下载系统镜像 (${NAME})" 10 50 0 3>&1 1>&2 2>&3
 				fi
 			fi
 
@@ -936,13 +936,13 @@ main() {
 	if [ -z ${SHOW_UI} ]; then
 		echo "installing ${NAME}..."
 	else
-		whiptail --infobox "提取并安装系统镜像 (${NAME}), 这可能需要一些时间。" 10 50
+		whiptail --infobox "提取并安装系统镜像 (${NAME}), 这可能需要一些时间。" 10 50 3>&1 1>&2 2>&3
 	fi
 
 	# 处理分包镜像文件
 	IMG_FILE=$(handle_multipart_image "${IMG_FILE}")
 	if [ $? -ne 0 ]; then
-		echo "Error handling multipart image"
+		echo "Error handling multipart image" >&2
 		exit 1
 	fi
 
@@ -953,9 +953,9 @@ main() {
 			echo "current_deploy: ${current_deploy}, remove it..." >&2
 			btrfs subvolume delete "${MOUNT_PATH}/${current_deploy}" || true
 		done
-	else
-		echo "没有找到需要删除的旧部署" >&2
 	fi
+
+	echo "deploying ${IMG_FILE} to ${DEPLOY_PATH}" >&2
 
 	if [[ "${IMG_FILE##*.}" == "img" ]]; then
 		btrfs receive --quiet ${DEPLOY_PATH} <${IMG_FILE}
@@ -969,7 +969,8 @@ main() {
 		fi
 	else
 		# Handle other cases or provide an error message
-		echo "Unsupported file format: ${IMG_FILE}"
+		echo "Unsupported file format: ${IMG_FILE}" >&2
+		exit 1
 	fi
 
 	mkdir -p ${MOUNT_PATH}/boot/${NAME}
