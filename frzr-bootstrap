@@ -707,12 +707,14 @@ function create_dual_boot_partitions() {
 	read -r ACTUAL_START_MIB ACTUAL_END_MIB <<<"$(get_free_space_boundaries)"
 	echo >&2 "ACTUAL_START_MIB: $ACTUAL_START_MIB, ACTUAL_END_MIB: $ACTUAL_END_MIB"
 	if [ -n "$ACTUAL_START_MIB" ]; then
-		local efi_end_mib=$((ACTUAL_START_MIB + 1024))
+		# 预留1MiB缓冲空间以处理对齐问题
+		local buffer_start_mib=$((ACTUAL_START_MIB + 1))
+		local efi_end_mib=$((buffer_start_mib + 1024))
 
-		echo >&2 "在释放空间中创建分区: ${ACTUAL_START_MIB}MiB - ${ACTUAL_END_MIB}MiB"
+		echo >&2 "在释放空间中创建分区: ${buffer_start_mib}MiB - ${ACTUAL_END_MIB}MiB (预留1MiB缓冲，原始: ${ACTUAL_START_MIB}MiB)"
 
 		# 创建EFI分区
-		if ! parted --script "$DISK" mkpart primary fat32 "${ACTUAL_START_MIB}MiB" "${efi_end_mib}MiB"; then
+		if ! parted --script --fix "$DISK" mkpart primary fat32 "${buffer_start_mib}MiB" "${efi_end_mib}MiB"; then
 			echo "创建EFI分区失败"
 			return 1
 		fi
@@ -728,7 +730,7 @@ function create_dual_boot_partitions() {
 		sleep 1
 
 		# 通过起始位置找到EFI分区编号
-		local efi_part_num=$(parted "$DISK" unit MiB print | awk -v start="$ACTUAL_START_MIB" '$2 ~ start {print $1}')
+		local efi_part_num=$(parted "$DISK" unit MiB print | awk -v start="$buffer_start_mib" '$2 ~ start {print $1}')
 		if ! parted "$DISK" set "$efi_part_num" esp on; then
 			echo "设置EFI分区标志失败"
 			return 1
@@ -742,8 +744,8 @@ function create_dual_boot_partitions() {
 	# 获取新创建的分区路径
 	if [ -n "$ACTUAL_START_MIB" ]; then
 		# 释放空间情况：通过起始位置找分区
-		local efi_start_mib=$ACTUAL_START_MIB
-		local root_start_mib=$((ACTUAL_START_MIB + 1024))
+		local efi_start_mib=$buffer_start_mib
+		local root_start_mib=$efi_end_mib
 
 		# 通过parted找到分区编号，然后构造路径
 		local efi_part_num=$(parted "$DISK" unit MiB print | awk -v start="$efi_start_mib" '$2 ~ start {print $1}')
