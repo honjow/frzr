@@ -124,7 +124,7 @@ function repair_install() {
 	bootctl --esp-path="${MOUNT_PATH}/boot/" install
 
 	echo "deleting subvolume..."
-	btrfs subvolume delete "${MOUNT_PATH}/deployments/*" || true
+	btrfs subvolume delete "${MOUNT_PATH}/deployments/"* || true
 
 	rm -rf "${MOUNT_PATH:?}/etc/"*
 
