@@ -8,6 +8,8 @@ if [[ -n "${DEBUG}" ]]; then
 	set -x
 fi
 
+DEFAULT_SOURCE="3003n/chimeraos:stable:gnome"
+
 get_img_url() {
 	CHANNEL=$1
 	local keywords="img"
@@ -652,13 +654,16 @@ main() {
 	if [ -n "$FRZR_SOURCE" ] && [ "$FRZR_SOURCE" != " " ] && [ $FRZR_CHECK_UPDATE -eq 0 ] && [ $FRZR_STEAM_PROGRESS -eq 0 ]; then
 		if [[ ! "$FRZR_SOURCE" =~ \.img(\.tar\.xz|\.xz|\.zst)?$ ]]; then
 			echo "$FRZR_SOURCE" >"${MOUNT_PATH}/source"
+		else
+			echo "$DEFAULT_SOURCE" >"${MOUNT_PATH}/source"
 		fi
 	fi
 
 	if [ -e "${MOUNT_PATH}/source" ]; then
 		SOURCE=$(cat "${MOUNT_PATH}/source" | head -1)
 	else
-		echo "WARNING: source wasn't specified"
+		echo "WARNING: source wasn't specified, using default source: ${DEFAULT_SOURCE}"
+		SOURCE="${DEFAULT_SOURCE}"
 	fi
 
 	if [ "${local_install}" == true ]; then
