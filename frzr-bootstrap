@@ -286,8 +286,8 @@ function get_free_space_boundaries() {
 	if [ -n "$SELECTED_FREE_SPACE_START" ] && [ -n "$SELECTED_FREE_SPACE_END" ]; then
 		echo "$SELECTED_FREE_SPACE_START $SELECTED_FREE_SPACE_END"
 	else
-		# fallback 到原有逻辑
-		local free_info=$(parted "$DISK" unit MiB print free | grep "Free Space" | tail -1)
+		# fallback 到原有逻辑 - 选择最大的空闲空间而不是最后一个
+		local free_info=$(parted "$DISK" unit MiB print free | awk '/Free Space/ {gsub(/MiB/, "", $3); size = $3 + 0; if (size > max_size) {max_size = size; max_line = $0}} END {print max_line}')
 		local free_start=$(echo "$free_info" | awk '{print $1}' | sed 's/MiB//')
 		local free_end=$(echo "$free_info" | awk '{print $2}' | sed 's/MiB//')
 		echo "$free_start $free_end"
@@ -525,6 +525,14 @@ function shrink_selected_partition() {
 		fi
 
 		echo "分区已完全删除"
+		
+		# 刷新分区表并等待更新
+		partprobe "$DISK"
+		sleep 2
+		
+		# 清空全局变量，强制重新检测空闲空间
+		SELECTED_FREE_SPACE_START=""
+		SELECTED_FREE_SPACE_END=""
 
 	else
 		# 缩小分区逻辑
