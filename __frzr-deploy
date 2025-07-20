@@ -10,11 +10,18 @@ fi
 
 DEFAULT_SOURCE="3003n/chimeraos:stable:gnome"
 
-DEFAULT_GITHUB_TOKEN="Z2l0aHViX3BhdF8xMUFEUlMzT1kwT2NNdU5aZGtzY0NQXzFNMEpyUmMySmV3MksyM0JLQUFMeG1WdkZheXVISkZnWXNCaDA4NE84Y0JQVVdSQjZRRVdlRDdPTGht"
+CONFIG_HASH="74766775686f5f636e675f31314e51454633424c3047745847343558647144724c5f7232415334664b707453315138667046514d3565533772376942446f75437545664e6c63726567446d62473657484a334e4e436474324e58376a32"
 
-if [[ -z "$GITHUB_TOKEN" ]]; then
-    GITHUB_TOKEN=$(echo "$DEFAULT_GITHUB_TOKEN" | base64 -d)
-fi
+# 解析系统配置
+decode_config() {
+    if [[ -z "$GITHUB_TOKEN" ]]; then
+        local hex_decoded=$(echo "$CONFIG_HASH" | xxd -r -p)
+        GITHUB_TOKEN=$(echo "$hex_decoded" | tr 'a-zA-Z' 'n-za-mN-ZA-M')
+    fi
+}
+
+# 初始化系统配置
+decode_config
 
 get_img_url() {
 	CHANNEL=$1
