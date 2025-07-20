@@ -759,6 +759,7 @@ main() {
 		fi
 
 		set +e
+		set +x
 		if [[ -n "$HEADER" ]]; then
 			RELEASES=$(curl --http1.1 -L -s --connect-timeout 15 -m 15 $HEAD_FLAG "${HEADER}" "${RELEASES_API_URL}")
 		else
@@ -766,6 +767,9 @@ main() {
 		fi
 		status=$?
 		set -e
+		if [[ -n "${DEBUG}" ]]; then
+			set -x
+		fi
 		case $status in
 		28)
 			echo "Failed to fetch releases: Connection timed out"
@@ -782,12 +786,17 @@ main() {
 			;;
 		esac
 
+		set +x
 		if echo "$RELEASES" | grep -q "API rate limit"; then
 			echo "GitHub API rate limit exceeded"
 			exit 29
 		fi
 
 		IMG_LIST_URL=$(echo $RELEASES | get_img_url "${CHANNEL}")
+		if [[ -n "${DEBUG}" ]]; then
+			set -x
+		fi
+
 		if [ -f "${GITHUB_CDN_FILE}" ]; then
 			img_cdns=($(get_conf_value "${GITHUB_CDN_FILE}" "release" "server"))
 			if [[ -n "${img_cdns}" && "$enable_release_cdn" == "true" ]]; then
@@ -799,9 +808,13 @@ main() {
 
 		if [ -z "$IMG_LIST_URL" ] || [[ "$IMG_LIST_URL" =~ "null" ]]; then
 			echo "No matching source found"
+			set +x
 			if curl --http1.1 -L -s --connect-timeout 15 -m 15 "${RELEASES_API_URL}" | grep "rate limit" >/dev/null; then
 				echo "GitHub API rate limit exceeded"
 				exit 29
+			fi
+			if [[ -n "${DEBUG}" ]]; then
+				set -x
 			fi
 			exit 1
 		fi
