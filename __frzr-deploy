@@ -799,6 +799,13 @@ main() {
 		esac
 
 		set +x
+		# 检查token是否失效
+		if echo "$RELEASES" | jq -e '.status == "401"' >/dev/null 2>&1; then
+    		echo "GitHub token invalid, retrying without authentication..." >&2
+    		unset GITHUB_TOKEN HEADER HEAD_FLAG
+    		RELEASES=$(curl --http1.1 -L -s --connect-timeout 15 -m 15 "${RELEASES_API_URL}")
+		fi
+
 		if echo "$RELEASES" | grep -q "API rate limit"; then
 			echo "GitHub API rate limit exceeded"
 			exit 29
