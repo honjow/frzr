@@ -210,7 +210,7 @@ function fresh_install() {
 		mklabel gpt \
 		mkpart primary fat32 "${start_sectors}s" "${efi_end_sectors}s" \
 		set 1 esp on \
-		mkpart primary "${efi_end_sectors}s" 100%
+		mkpart primary "$((efi_end_sectors + 1))s" 100%
 
 	PART1=$(fdisk -o Device --list "${DISK}" | grep "^${DISK}.*1$")
 	PART2=$(fdisk -o Device --list "${DISK}" | grep "^${DISK}.*2$")
@@ -778,7 +778,7 @@ function create_dual_boot_partitions() {
 		local efi_end_sectors=$(align_to_sector_boundary $((buffer_start_sectors + $(mib_to_sectors 1024))))
 		
 		local buffer_start_mib=$(sectors_to_mib "$buffer_start_sectors")
-		local efi_end_mib=$(sectors_to_mib "$efi_end_sectors")
+		# local efi_end_mib=$(sectors_to_mib "$efi_end_sectors")
 		echo >&2 "在释放空间中创建分区: ${buffer_start_mib}MiB(${buffer_start_sectors}s) - ${end_mib}MiB(${ACTUAL_END_SECTORS}s) (预留缓冲，原始: ${start_mib}MiB(${ACTUAL_START_SECTORS}s))"
 
 		# 创建EFI分区
@@ -788,7 +788,7 @@ function create_dual_boot_partitions() {
 		fi
 
 		# 创建根分区
-		if ! parted --script "$DISK" mkpart primary "${efi_end_sectors}s" "${ACTUAL_END_SECTORS}s"; then
+		if ! parted --script "$DISK" mkpart primary "$((efi_end_sectors + 1))s" "${ACTUAL_END_SECTORS}s"; then
 			echo "创建根分区失败"
 			return 1
 		fi
@@ -814,7 +814,7 @@ function create_dual_boot_partitions() {
 		# 释放空间情况：通过起始位置找分区
 		# 通过parted找到分区编号，然后构造路径
 		local efi_part_num=$(parted "$DISK" unit s print | awk -v start="$buffer_start_sectors" '$2 ~ start {print $1}')
-		local root_part_num=$(parted "$DISK" unit s print | awk -v start="$efi_end_sectors" '$2 ~ start {print $1}')
+		local root_part_num=$(parted "$DISK" unit s print | awk -v start="$((efi_end_sectors + 1))" '$2 ~ start {print $1}')
 
 		# 构造分区路径
 		if [[ "$DISK" == *"nvme"* ]]; then
