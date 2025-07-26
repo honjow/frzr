@@ -718,29 +718,29 @@ function update_partition_table() {
 		fi
 	fi
 
-	# 方法2: 使用 sfdisk
-	if command -v sfdisk >/dev/null 2>&1; then
-		echo "尝试使用 sfdisk 调整分区表..."
-		# 获取当前分区信息
-		local current_info=$(sfdisk --list "$DISK" 2>/dev/null | grep "^${partition}[[:space:]]" | head -1)
-		if [ -n "$current_info" ]; then
-			local current_start=$(echo "$current_info" | awk '{print $2}')
-			local current_sectors=$(echo "$current_info" | awk '{print $4}')
-			local new_sectors=$((current_sectors - shrink_sectors))
+	# 方法2: 使用 sfdisk （严重问题，会导致分区表损坏）
+	# if [ "$success" = false ] && command -v sfdisk >/dev/null 2>&1; then
+	# 	echo "尝试使用 sfdisk 调整分区表..."
+	# 	# 获取当前分区信息
+	# 	local current_info=$(sfdisk --list "$DISK" 2>/dev/null | grep "^${partition}[[:space:]]" | head -1)
+	# 	if [ -n "$current_info" ]; then
+	# 		local current_start=$(echo "$current_info" | awk '{print $2}')
+	# 		local current_sectors=$(echo "$current_info" | awk '{print $4}')
+	# 		local new_sectors=$((current_sectors - shrink_sectors))
 			
-			# 检查新大小是否合理
-			if [ "$new_sectors" -le 0 ]; then
-				echo "错误: 分区太小，无法缩小 ${shrink_size}GiB，sfdisk 方法跳过"
-			elif echo "$part_num : start=$current_start, size=$new_sectors" | sfdisk --force "$DISK" 2>/dev/null; then
-				echo "sfdisk 方法成功"
-				success=true
-			else
-				echo "sfdisk 方法失败，尝试下一种方法"
-			fi
-		else
-			echo "无法获取分区信息，sfdisk 方法跳过"
-		fi
-	fi
+	# 		# 检查新大小是否合理
+	# 		if [ "$new_sectors" -le 0 ]; then
+	# 			echo "错误: 分区太小，无法缩小 ${shrink_size}GiB，sfdisk 方法跳过"
+	# 		elif echo "$part_num : start=$current_start, size=$new_sectors" | sfdisk --force "$DISK" 2>/dev/null; then
+	# 			echo "sfdisk 方法成功"
+	# 			success=true
+	# 		else
+	# 			echo "sfdisk 方法失败，尝试下一种方法"
+	# 		fi
+	# 	else
+	# 		echo "无法获取分区信息，sfdisk 方法跳过"
+	# 	fi
+	# fi
 
 	# 方法3: 使用 parted -s -f (保底方案 可能会失败)
 	if [ "$success" = false ]; then
