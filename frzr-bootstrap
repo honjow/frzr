@@ -606,9 +606,9 @@ function shrink_selected_partition() {
 		fi
 
 		# 执行缩小
+		local target_sectors=$(mib_to_sectors $((target_size_gb * 1024)))
 		case "$fstype" in
 		"ntfs")
-			local target_sectors=$(mib_to_sectors $((target_size_gb * 1024)))
 			echo "缩小NTFS分区到 ${target_size_gb}GiB(${target_sectors}s)..."
 			if ! ntfsresize --check "$partition"; then
 				echo "NTFS文件系统检查失败"
