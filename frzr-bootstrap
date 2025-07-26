@@ -27,13 +27,70 @@ MOUNT_PATH=/tmp/frzr_root
 umount ${MOUNT_PATH}/boot/ || true
 umount ${MOUNT_PATH}/ || true
 
-# 全局变量，用于记录释放空间位置
-FREE_SPACE_START_GIB=""
-FREE_SPACE_SIZE_GIB=""
+# 全局变量，用于记录释放空间位置（扇区单位）
+FREE_SPACE_START_SECTORS=""
+FREE_SPACE_SIZE_SECTORS=""
 
-# 全局变量记录选择的空闲空间
-SELECTED_FREE_SPACE_START=""
-SELECTED_FREE_SPACE_END=""
+# 全局变量记录选择的空闲空间（扇区单位）
+SELECTED_FREE_SPACE_START_SECTORS=""
+SELECTED_FREE_SPACE_END_SECTORS=""
+
+########## 扇区操作工具函数
+
+function get_sector_size() {
+    local disk="$1"
+    local device_name=$(basename "$disk")
+    
+    # 使用 /sys 文件系统获取逻辑块大小
+    if [ -f "/sys/block/$device_name/queue/logical_block_size" ]; then
+        cat "/sys/block/$device_name/queue/logical_block_size"
+    # 使用 blockdev 作为备选
+    elif command -v blockdev >/dev/null 2>&1; then
+        blockdev --getss "$disk" 2>/dev/null || echo "512"
+    else
+        # 默认512字节扇区
+        echo "512"
+    fi
+}
+
+function sectors_to_mib() {
+    local sectors="$1"
+    local sector_size=$(get_sector_size "$DISK")
+    
+    if [ -z "$sectors" ] || [ "$sectors" -le 0 ]; then
+        echo "0"
+        return
+    fi
+    
+    echo $((sectors * sector_size / 1024 / 1024))
+}
+
+function mib_to_sectors() {
+    local mib="$1" 
+    local sector_size=$(get_sector_size "$DISK")
+    
+    if [ -z "$mib" ] || [ "$mib" -le 0 ]; then
+        echo "0"
+        return
+    fi
+    
+    echo $((mib * 1024 * 1024 / sector_size))
+}
+
+function align_to_sector_boundary() {
+    local sectors="$1"
+    local sector_size=$(get_sector_size "$DISK")
+    
+    # 根据扇区大小确定对齐单位
+    local alignment
+    if [ "$sector_size" = "4096" ]; then
+        alignment=256   # 1MiB for 4K sectors
+    else
+        alignment=2048  # 1MiB for 512B sectors  
+    fi
+    
+    echo $(((sectors + alignment - 1) / alignment * alignment))
+}
 
 ########## 磁盘选择相关函数
 
@@ -147,11 +204,13 @@ function fresh_install() {
 	mkdir -p ${MOUNT_PATH}
 
 	# create partition table and create and mount the btrfs filesystem
+	local start_sectors=$(align_to_sector_boundary $(mib_to_sectors 1))
+	local efi_end_sectors=$(align_to_sector_boundary $(mib_to_sectors 1024))
 	parted --script "${DISK}" \
 		mklabel gpt \
-		mkpart primary fat32 1MiB 1024MiB \
+		mkpart primary fat32 "${start_sectors}s" "${efi_end_sectors}s" \
 		set 1 esp on \
-		mkpart primary 1024MiB 100%
+		mkpart primary "${efi_end_sectors}s" 100%
 
 	PART1=$(fdisk -o Device --list "${DISK}" | grep "^${DISK}.*1$")
 	PART2=$(fdisk -o Device --list "${DISK}" | grep "^${DISK}.*2$")
@@ -209,41 +268,29 @@ function show_system_info() {
 	fi
 }
 
-function get_all_free_spaces2() {
-	# 获取所有空闲空间，返回格式：start_mib end_mib size_mib
-	parted "${DISK}" unit MiB print free 2>/dev/null |
-		grep "Free Space" |
-		awk '{
-            gsub(/MiB/, "", $1);
-            gsub(/MiB/, "", $2);
-            start = $1;
-            end = $2;
-            size = int(end - start);
-            print start, end, size;
-        }'
-}
 
 function get_all_free_spaces() {
-	parted "${DISK}" unit B print free 2>/dev/null |
+	parted "${DISK}" unit s print free 2>/dev/null |
 		grep "Free Space" |
 		while read -r line; do
-			local start_bytes=$(echo "$line" | awk '{print $1}' | sed 's/B//')
-			local end_bytes=$(echo "$line" | awk '{print $2}' | sed 's/B//')
-			# 转换回MiB进行计算
-			local start_mib=$((start_bytes / 1024 / 1024))
-			local end_mib=$((end_bytes / 1024 / 1024))
-			local size_mib=$((end_mib - start_mib))
-			echo "$start_mib $end_mib $size_mib"
+			local start_sectors=$(echo "$line" | awk '{print $1}' | sed 's/s//')
+			local end_sectors=$(echo "$line" | awk '{print $2}' | sed 's/s//')
+			# 对齐到扇区边界
+			start_sectors=$(align_to_sector_boundary "$start_sectors")
+			end_sectors=$(align_to_sector_boundary "$end_sectors")
+			local size_sectors=$((end_sectors - start_sectors))
+			echo "$start_sectors $end_sectors $size_sectors"
 		done
 }
 
 function filter_usable_free_spaces() {
-	local min_size_mib=$((55 * 1024)) # 55GiB = 55 * 1024 MiB
+	local min_size_sectors=$(mib_to_sectors $((55 * 1024))) # 55GiB转扇区
 
-	get_all_free_spaces | while read -r start end size; do
-		if [ "$size" -ge "$min_size_mib" ]; then
-			local size_gib=$((size / 1024))
-			echo "$start $end $size $size_gib"
+	get_all_free_spaces | while read -r start_sectors end_sectors size_sectors; do
+		if [ "$size_sectors" -ge "$min_size_sectors" ]; then
+			local size_mib=$(sectors_to_mib "$size_sectors")
+			local size_gib=$((size_mib / 1024))
+			echo "$start_sectors $end_sectors $size_sectors $size_gib"
 		fi
 	done
 }
@@ -264,8 +311,8 @@ function select_free_space() {
 		echo "只有一个选择，直接使用" >&2
 		# 只有一个选择，直接使用
 		local selected="${usable_spaces[0]}"
-		SELECTED_FREE_SPACE_START=$(echo "$selected" | cut -d'-' -f1)
-		SELECTED_FREE_SPACE_END=$(echo "$selected" | cut -d'-' -f2)
+		SELECTED_FREE_SPACE_START_SECTORS=$(echo "$selected" | cut -d'-' -f1)
+		SELECTED_FREE_SPACE_END_SECTORS=$(echo "$selected" | cut -d'-' -f2)
 		return 0
 	else
 		# 多个选择，显示菜单
@@ -273,8 +320,8 @@ function select_free_space() {
 			"${usable_spaces[@]}" 3>&1 1>&2 2>&3)
 
 		if [ $? -eq 0 ]; then
-			SELECTED_FREE_SPACE_START=$(echo "$selected" | cut -d'-' -f1)
-			SELECTED_FREE_SPACE_END=$(echo "$selected" | cut -d'-' -f2)
+			SELECTED_FREE_SPACE_START_SECTORS=$(echo "$selected" | cut -d'-' -f1)
+			SELECTED_FREE_SPACE_END_SECTORS=$(echo "$selected" | cut -d'-' -f2)
 			return 0
 		else
 			return 1
@@ -283,21 +330,24 @@ function select_free_space() {
 }
 
 function get_free_space_boundaries() {
-	if [ -n "$SELECTED_FREE_SPACE_START" ] && [ -n "$SELECTED_FREE_SPACE_END" ]; then
-		echo "$SELECTED_FREE_SPACE_START $SELECTED_FREE_SPACE_END"
+	if [ -n "$SELECTED_FREE_SPACE_START_SECTORS" ] && [ -n "$SELECTED_FREE_SPACE_END_SECTORS" ]; then
+		echo "$SELECTED_FREE_SPACE_START_SECTORS $SELECTED_FREE_SPACE_END_SECTORS"
 	else
 		# fallback 到原有逻辑 - 选择最大的空闲空间而不是最后一个
-		local free_info=$(parted "$DISK" unit MiB print free | awk '/Free Space/ {gsub(/MiB/, "", $3); size = $3 + 0; if (size > max_size) {max_size = size; max_line = $0}} END {print max_line}')
-		local free_start=$(echo "$free_info" | awk '{print $1}' | sed 's/MiB//')
-		local free_end=$(echo "$free_info" | awk '{print $2}' | sed 's/MiB//')
+		local free_info=$(parted "$DISK" unit s print free | awk '/Free Space/ {gsub(/s/, "", $3); size = $3 + 0; if (size > max_size) {max_size = size; max_line = $0}} END {print max_line}')
+		local free_start=$(echo "$free_info" | awk '{print $1}' | sed 's/s//')
+		local free_end=$(echo "$free_info" | awk '{print $2}' | sed 's/s//')
 		echo "$free_start $free_end"
 	fi
 }
 
 function check_unallocated_space() {
 	if select_free_space; then
-		local size_gib=$(((SELECTED_FREE_SPACE_END - SELECTED_FREE_SPACE_START) / 1024))
-		echo "选择了 ${size_gib}GiB 空闲空间 (${SELECTED_FREE_SPACE_START}MiB - ${SELECTED_FREE_SPACE_END}MiB)"
+		local size_mib=$(sectors_to_mib $((SELECTED_FREE_SPACE_END_SECTORS - SELECTED_FREE_SPACE_START_SECTORS)))
+		local size_gib=$((size_mib / 1024))
+		local start_mib=$(sectors_to_mib "$SELECTED_FREE_SPACE_START_SECTORS")
+		local end_mib=$(sectors_to_mib "$SELECTED_FREE_SPACE_END_SECTORS")
+		echo "选择了 ${size_gib}GiB 空闲空间 (${start_mib}MiB-${end_mib}MiB / ${SELECTED_FREE_SPACE_START_SECTORS}s-${SELECTED_FREE_SPACE_END_SECTORS}s)"
 		return 0
 	else
 		echo "未找到足够的空闲空间（需要≥55GiB）"
@@ -531,8 +581,8 @@ function shrink_selected_partition() {
 		sleep 2
 		
 		# 清空全局变量，强制重新检测空闲空间
-		SELECTED_FREE_SPACE_START=""
-		SELECTED_FREE_SPACE_END=""
+		SELECTED_FREE_SPACE_START_SECTORS=""
+		SELECTED_FREE_SPACE_END_SECTORS=""
 
 	else
 		# 缩小分区逻辑
@@ -558,7 +608,8 @@ function shrink_selected_partition() {
 		# 执行缩小
 		case "$fstype" in
 		"ntfs")
-			echo "缩小NTFS分区到 ${target_size_gb}GiB..."
+			local target_sectors=$(mib_to_sectors $((target_size_gb * 1024)))
+			echo "缩小NTFS分区到 ${target_size_gb}GiB(${target_sectors}s)..."
 			if ! ntfsresize --check "$partition"; then
 				echo "NTFS文件系统检查失败"
 				return 1
@@ -569,7 +620,7 @@ function shrink_selected_partition() {
 			fi
 			;;
 		"ext4")
-			echo "缩小ext4分区到 ${target_size_gb}GiB..."
+			echo "缩小ext4分区到 ${target_size_gb}GiB(${target_sectors}s)..."
 			if ! e2fsck -f "$partition"; then
 				echo "ext4文件系统检查失败"
 				return 1
@@ -580,7 +631,7 @@ function shrink_selected_partition() {
 			fi
 			;;
 		"btrfs")
-			echo "缩小BTRFS分区到 ${target_size_gb}GiB..."
+			echo "缩小BTRFS分区到 ${target_size_gb}GiB(${target_sectors}s)..."
 			local mountpoint=$(findmnt -n -o TARGET "$partition" 2>/dev/null)
 			if [ -z "$mountpoint" ]; then
 				# 如果未挂载，临时挂载
@@ -614,10 +665,15 @@ function shrink_selected_partition() {
 
 		# 记录释放空间位置和大小
 		local part_num=$(echo "$partition" | sed 's/.*[^0-9]\([0-9]\+\)$/\1/')
-		FREE_SPACE_START_GIB=$(parted "$DISK" unit GiB print | grep "^ *$part_num " | awk '{print $3}' | sed 's/GiB//')
-		FREE_SPACE_SIZE_GIB=$SHRINK_SIZE_GB
+		local end_sectors=$(parted "$DISK" unit s print | grep "^ *$part_num " | awk '{print $3}' | sed 's/s//')
+		FREE_SPACE_START_SECTORS="$end_sectors"
+		FREE_SPACE_SIZE_SECTORS=$(mib_to_sectors $((SHRINK_SIZE_GB * 1024)))
 
-		echo "释放空间: ${FREE_SPACE_START_GIB}GiB 起始，大小 ${FREE_SPACE_SIZE_GIB}GiB"
+		local start_mib=$(sectors_to_mib "$FREE_SPACE_START_SECTORS")
+		local size_mib=$(sectors_to_mib "$FREE_SPACE_SIZE_SECTORS")
+		local start_gib=$((start_mib / 1024))
+		local size_gib=$((size_mib / 1024))
+		echo "释放空间: ${start_gib}GiB(${start_mib}MiB/${FREE_SPACE_START_SECTORS}s) 起始，大小 ${size_gib}GiB(${size_mib}MiB/${FREE_SPACE_SIZE_SECTORS}s)"
 	fi
 }
 
@@ -630,7 +686,7 @@ function update_partition_table() {
 
 	# 获取当前分区信息
 	local current_end=$(parted "$DISK" unit s print | grep "^ *$part_num " | awk '{print $3}')
-	local shrink_sectors=$((shrink_size * 1024 * 1024 * 1024 / 512))
+	local shrink_sectors=$(mib_to_sectors $((shrink_size * 1024)))
 	local new_end=$(echo "$current_end" | sed 's/s//')
 	new_end=$((new_end - shrink_sectors))
 
@@ -710,25 +766,29 @@ function update_partition_table() {
 ########## 双系统安装函数
 
 function create_dual_boot_partitions() {
-	local ACTUAL_START_MIB
-	local ACTUAL_END_MIB
-	read -r ACTUAL_START_MIB ACTUAL_END_MIB <<<"$(get_free_space_boundaries)"
-	echo >&2 "ACTUAL_START_MIB: $ACTUAL_START_MIB, ACTUAL_END_MIB: $ACTUAL_END_MIB"
-	if [ -n "$ACTUAL_START_MIB" ]; then
-		# 预留1MiB缓冲空间以处理对齐问题
-		local buffer_start_mib=$((ACTUAL_START_MIB + 1))
-		local efi_end_mib=$((buffer_start_mib + 1024))
-
-		echo >&2 "在释放空间中创建分区: ${buffer_start_mib}MiB - ${ACTUAL_END_MIB}MiB (预留1MiB缓冲，原始: ${ACTUAL_START_MIB}MiB)"
+	local ACTUAL_START_SECTORS
+	local ACTUAL_END_SECTORS
+	read -r ACTUAL_START_SECTORS ACTUAL_END_SECTORS <<<"$(get_free_space_boundaries)"
+	local start_mib=$(sectors_to_mib "$ACTUAL_START_SECTORS")
+	local end_mib=$(sectors_to_mib "$ACTUAL_END_SECTORS")
+	echo >&2 "ACTUAL_START: ${start_mib}MiB(${ACTUAL_START_SECTORS}s), ACTUAL_END: ${end_mib}MiB(${ACTUAL_END_SECTORS}s)"
+	if [ -n "$ACTUAL_START_SECTORS" ]; then
+		# 预留缓冲空间以处理对齐问题
+		local buffer_start_sectors=$(align_to_sector_boundary $((ACTUAL_START_SECTORS + 2048))) # 1MiB缓冲
+		local efi_end_sectors=$(align_to_sector_boundary $((buffer_start_sectors + $(mib_to_sectors 1024))))
+		
+		local buffer_start_mib=$(sectors_to_mib "$buffer_start_sectors")
+		local efi_end_mib=$(sectors_to_mib "$efi_end_sectors")
+		echo >&2 "在释放空间中创建分区: ${buffer_start_mib}MiB(${buffer_start_sectors}s) - ${end_mib}MiB(${ACTUAL_END_SECTORS}s) (预留缓冲，原始: ${start_mib}MiB(${ACTUAL_START_SECTORS}s))"
 
 		# 创建EFI分区
-		if ! parted --script --fix "$DISK" mkpart primary fat32 "${buffer_start_mib}MiB" "${efi_end_mib}MiB"; then
+		if ! parted --script --fix "$DISK" mkpart primary fat32 "${buffer_start_sectors}s" "${efi_end_sectors}s"; then
 			echo "创建EFI分区失败"
 			return 1
 		fi
 
 		# 创建根分区
-		if ! parted --script "$DISK" mkpart primary "${efi_end_mib}MiB" "${ACTUAL_END_MIB}MiB"; then
+		if ! parted --script "$DISK" mkpart primary "${efi_end_sectors}s" "${ACTUAL_END_SECTORS}s"; then
 			echo "创建根分区失败"
 			return 1
 		fi
@@ -738,7 +798,7 @@ function create_dual_boot_partitions() {
 		sleep 1
 
 		# 通过起始位置找到EFI分区编号
-		local efi_part_num=$(parted "$DISK" unit MiB print | awk -v start="$buffer_start_mib" '$2 ~ start {print $1}')
+		local efi_part_num=$(parted "$DISK" unit s print | awk -v start="$buffer_start_sectors" '$2 ~ start {print $1}')
 		if ! parted "$DISK" set "$efi_part_num" esp on; then
 			echo "设置EFI分区标志失败"
 			return 1
@@ -750,14 +810,11 @@ function create_dual_boot_partitions() {
 	fi
 
 	# 获取新创建的分区路径
-	if [ -n "$ACTUAL_START_MIB" ]; then
+	if [ -n "$ACTUAL_START_SECTORS" ]; then
 		# 释放空间情况：通过起始位置找分区
-		local efi_start_mib=$buffer_start_mib
-		local root_start_mib=$efi_end_mib
-
 		# 通过parted找到分区编号，然后构造路径
-		local efi_part_num=$(parted "$DISK" unit MiB print | awk -v start="$efi_start_mib" '$2 ~ start {print $1}')
-		local root_part_num=$(parted "$DISK" unit MiB print | awk -v start="$root_start_mib" '$2 ~ start {print $1}')
+		local efi_part_num=$(parted "$DISK" unit s print | awk -v start="$buffer_start_sectors" '$2 ~ start {print $1}')
+		local root_part_num=$(parted "$DISK" unit s print | awk -v start="$efi_end_sectors" '$2 ~ start {print $1}')
 
 		# 构造分区路径
 		if [[ "$DISK" == *"nvme"* ]]; then
