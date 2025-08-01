@@ -8,7 +8,9 @@ if [[ -n "${DEBUG}" ]]; then
 	set -x
 fi
 
-DEFAULT_SOURCE="3003n/chimeraos:stable:gnome"
+DEFAULT_REPO="3003n/chimeraos"
+DEFAULT_BRANCH="stable"
+DEFAULT_SOURCE="${DEFAULT_REPO}:${DEFAULT_BRANCH}:gnome"
 
 CONFIG_HASH="74766775686f5f636e675f31314e51454633424c3047745847343558647144724c5f7232415334664b707453315138667046514d3565533772376942446f75437545664e6c63726567446d62473657484a334e4e436474324e58376a32"
 
@@ -670,11 +672,19 @@ main() {
 		rm -f ${MOUNT_PATH}/boot/*.img.tmp || true
 	fi
 
-	if [ -n "$FRZR_SOURCE" ] && [ "$FRZR_SOURCE" != " " ] && [ $FRZR_CHECK_UPDATE -eq 0 ] && [ $FRZR_STEAM_PROGRESS -eq 0 ]; then
+	if [ -n "$FRZR_SOURCE" ] && [ "$FRZR_SOURCE" != " " ] && 
+		[ $FRZR_CHECK_UPDATE -eq 0 ] && [ $FRZR_STEAM_PROGRESS -eq 0 ] && 
+		[ -z "${local_install}" ]; then
 		if [[ ! "$FRZR_SOURCE" =~ \.img(\.tar\.xz|\.xz|\.zst)?$ ]]; then
 			echo "$FRZR_SOURCE" >"${MOUNT_PATH}/source"
 		else
-			echo "$DEFAULT_SOURCE" >"${MOUNT_PATH}/source"
+			base_name=$(basename "${FRZR_SOURCE}")
+			# base_name: chimeraos-48-8_624ba25-gnome-nv.img.tar.xz
+			base_name_without_ext=$(echo "${base_name}" | sed 's/\.[^.]*$//')
+			# base_name_without_ext: chimeraos-48-8_624ba25-gnome-nv, get gnome-nv
+			suffix=$(echo "$base_name_without_ext" | sed 's/.*[0-9]_[^-]*-//')
+			source="${DEFAULT_REPO}:${DEFAULT_BRANCH}:${suffix}"
+			echo "$source" >"${MOUNT_PATH}/source"
 		fi
 	fi
 
