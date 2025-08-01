@@ -92,6 +92,22 @@ function align_to_sector_boundary() {
     echo $(((sectors + alignment - 1) / alignment * alignment))
 }
 
+function align_end_to_sector_boundary() {
+    local sectors="$1"
+    local sector_size=$(get_sector_size "$DISK")
+    
+    # 根据扇区大小确定对齐单位
+    local alignment
+    if [ "$sector_size" = "4096" ]; then
+        alignment=256   # 1MiB for 4K sectors
+    else
+        alignment=2048  # 1MiB for 512B sectors  
+    fi
+    
+    # 向下对齐，确保不超出可用边界
+    echo $((sectors / alignment * alignment))
+}
+
 ########## 磁盘选择相关函数
 
 function select_disk() {
@@ -277,7 +293,7 @@ function get_all_free_spaces() {
 			local end_sectors=$(echo "$line" | awk '{print $2}' | sed 's/s//')
 			# 对齐到扇区边界
 			start_sectors=$(align_to_sector_boundary "$start_sectors")
-			end_sectors=$(align_to_sector_boundary "$end_sectors")
+			end_sectors=$(align_end_to_sector_boundary "$end_sectors")
 			local size_sectors=$((end_sectors - start_sectors))
 			echo "$start_sectors $end_sectors $size_sectors"
 		done
