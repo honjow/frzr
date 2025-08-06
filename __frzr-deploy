@@ -573,6 +573,13 @@ function get_branch() {
     echo "$deployment" | awk -F '_' '{print $NF}' | awk -F '-' '{print $2}'
 }
 
+get_version_from_name() {
+    local name=$1
+    # chimeraos-50-4_5d150d2-gnome-nv -> 50-4_5d150d2
+    # chimeraos-48-8_624ba25-cosmic -> 48-8_624ba25
+    echo "$name" | sed -n 's/chimeraos-\([0-9]\+-[0-9]\+_[a-f0-9]\+\)-.*/\1/p'
+}
+
 get_frzr_release() {
 	if [ -e /build_info ]; then
 		cat /build_info | head -1
@@ -748,16 +755,32 @@ main() {
 		CHANNEL=$(echo "${SOURCE}" | cut -f 2 -d ':')
 		BRANCH=$(echo "${SOURCE}" | cut -f 3 -d ':')
 
-		RELEASES_API_URL="https://api.github.com/repos/${REPO}/releases?per_page=100"
+		RELEASES_API_URL="https://api.github.com/repos/${REPO}/releases?per_page=10"
 
+		# 设置默认值
+		enable_api_cdn="false"
+		enable_release_cdn="false"
+		enable_fallback_url="true"
+		enable_gitee_api="true"
+		enable_gitee_checksum="true"
+		
 		FRZR_SK_CONFIG="/etc/frzr-sk.conf"
 		if [ -f "${FRZR_SK_CONFIG}" ]; then
-			enable_api_cdn=($(get_conf_value "${FRZR_SK_CONFIG}" "Download" "api_cdn"))
-			enable_release_cdn=($(get_conf_value "${FRZR_SK_CONFIG}" "Download" "release_cdn"))
-			enable_fallback_url=($(get_conf_value "${FRZR_SK_CONFIG}" "Download" "fallback_url"))
+			enable_api_cdn=$(get_conf_value "${FRZR_SK_CONFIG}" "Download" "api_cdn")
+			enable_release_cdn=$(get_conf_value "${FRZR_SK_CONFIG}" "Download" "release_cdn")
+			enable_fallback_url=$(get_conf_value "${FRZR_SK_CONFIG}" "Download" "fallback_url")
+			enable_gitee_api=$(get_conf_value "${FRZR_SK_CONFIG}" "Download" "gitee_api")
+			enable_gitee_checksum=$(get_conf_value "${FRZR_SK_CONFIG}" "Download" "gitee_checksum")
+			
+			# 如果配置文件中的值为空，使用默认值
+			[[ -z "$enable_api_cdn" ]] && enable_api_cdn="false"
+			[[ -z "$enable_release_cdn" ]] && enable_release_cdn="false"
+			[[ -z "$enable_fallback_url" ]] && enable_fallback_url="true"
+			[[ -z "$enable_gitee_api" ]] && enable_gitee_api="true"
+			[[ -z "$enable_gitee_checksum" ]] && enable_gitee_checksum="true"
 		fi
 
-		# echo -e "enable_api_cdn = ${enable_api_cdn}\nenable_release_cdn = ${enable_release_cdn}\nenable_fallback_url = ${enable_fallback_url}"
+		# echo "配置加载: API CDN=${enable_api_cdn}, Release CDN=${enable_release_cdn}, Fallback=${enable_fallback_url}, Gitee API=${enable_gitee_api}, Gitee 校验=${enable_gitee_checksum}" >&2
 
 		GITHUB_CDN_FILE="/etc/github_cdn.conf"
 		if [ -f "${GITHUB_CDN_FILE}" ]; then
@@ -782,12 +805,31 @@ main() {
 
 		set +e
 		set +x
-		if [[ -n "$HEADER" ]]; then
-			RELEASES=$(curl --http1.1 -L -s --connect-timeout 15 -m 15 $HEAD_FLAG "${HEADER}" "${RELEASES_API_URL}")
-		else
-			RELEASES=$(curl --http1.1 -L -s --connect-timeout 15 -m 15 "${RELEASES_API_URL}")
+		
+		# 优先尝试 Gitee API
+		if [[ "$enable_gitee_api" == "true" ]]; then
+			GITEE_API_URL="https://gitee.com/honjow/sk-api-info/raw/master/sk-chimeraos/release.json"
+			echo "正在从 Gitee 获取发布信息: ${GITEE_API_URL}" >&2
+			RELEASES=$(curl --http1.1 -L -s --connect-timeout 60 -m 60 "${GITEE_API_URL}")
+			status=$?
+			if [[ $status -eq 0 && -n "$RELEASES" && "${RELEASES:0:1}" == "[" ]]; then
+				echo "Gitee 发布信息获取成功" >&2
+			else
+				echo "Gitee 发布信息获取失败[$status]，使用 GitHub 源" >&2
+				RELEASES=""
+			fi
 		fi
-		status=$?
+		
+		# 如果 Gitee API 失败或未启用，使用原有的 GitHub API
+		if [[ -z "$RELEASES" ]]; then
+			echo "正在从 GitHub 获取发布信息: ${RELEASES_API_URL}" >&2
+			if [[ -n "$HEADER" ]]; then
+				RELEASES=$(curl --http1.1 -L -s --connect-timeout 15 -m 15 $HEAD_FLAG "${HEADER}" "${RELEASES_API_URL}")
+			else
+				RELEASES=$(curl --http1.1 -L -s --connect-timeout 15 -m 15 "${RELEASES_API_URL}")
+			fi
+			status=$?
+		fi
 		set -e
 		if [[ -n "${DEBUG}" ]]; then
 			set -x
@@ -849,10 +891,41 @@ main() {
 		fi
 
 		BASE_URL=$(dirname "$(echo "${IMG_LIST_URL}" | cut -d' ' -f1)")
-		if [ -n "$BRANCH" ]; then
-			IMG_LIST_STR="$(curl --http1.1 -L -s --connect-timeout 15 -m 15 ${BASE_URL}/sha256sum-${BRANCH}.txt)"
-		else
-			IMG_LIST_STR="$(curl --http1.1 -L -s --connect-timeout 15 -m 15 ${BASE_URL}/sha256sum.txt)"
+		
+		# 优先尝试 Gitee 校验文件
+		IMG_LIST_STR=""
+		if [[ "$enable_gitee_checksum" == "true" ]]; then
+			# 从 IMG_LIST_URL 提取文件名，然后提取版本信息
+			IMG_FILE_NAME=$(basename "$(echo "${IMG_LIST_URL}" | cut -d' ' -f1)" | sed 's/-[0-9]*$//')
+			NAME_FOR_VERSION=$(echo "${IMG_FILE_NAME}" | cut -f 1 -d '.')
+			VERSION_PATH=$(get_version_from_name "${NAME_FOR_VERSION}")
+			
+			if [[ -n "$VERSION_PATH" && -n "$BRANCH" ]]; then
+				GITEE_CHECKSUM_URL="https://gitee.com/honjow/sk-api-info/raw/master/sk-chimeraos/checksum/${VERSION_PATH}/sha256sum-${BRANCH}.txt"
+				echo "正在从 Gitee 获取校验文件: ${GITEE_CHECKSUM_URL}" >&2
+				IMG_LIST_STR="$(curl --http1.1 -L -s --connect-timeout 15 -m 15 "${GITEE_CHECKSUM_URL}")"
+				if [[ $? -eq 0 && -n "$IMG_LIST_STR" && ! "$IMG_LIST_STR" =~ "404" ]]; then
+					echo "Gitee 校验文件获取成功" >&2
+				else
+					echo "Gitee 校验文件获取失败，使用原有方式" >&2
+					IMG_LIST_STR=""
+				fi
+			else
+				echo "无法解析版本路径，跳过 Gitee 校验文件" >&2
+			fi
+		fi
+		
+		# 如果 Gitee 校验文件失败或未启用，使用原有方法
+		if [[ -z "$IMG_LIST_STR" ]]; then
+			if [ -n "$BRANCH" ]; then
+				CHECKSUM_URL="${BASE_URL}/sha256sum-${BRANCH}.txt"
+				echo "正在从原始源获取校验文件: ${CHECKSUM_URL}" >&2
+				IMG_LIST_STR="$(curl --http1.1 -L -s --connect-timeout 15 -m 15 ${CHECKSUM_URL})"
+			else
+				CHECKSUM_URL="${BASE_URL}/sha256sum.txt"
+				echo "正在从原始源获取校验文件: ${CHECKSUM_URL}" >&2
+				IMG_LIST_STR="$(curl --http1.1 -L -s --connect-timeout 15 -m 15 ${CHECKSUM_URL})"
+			fi
 		fi
 
 		echo "$IMG_LIST_STR" >&2
