@@ -687,7 +687,7 @@ main() {
 		else
 			base_name=$(basename "${FRZR_SOURCE}")
 			# base_name: chimeraos-48-8_624ba25-gnome-nv.img.tar.xz
-			base_name_without_ext="${base_name%.img*}"
+			base_name_without_ext="${base_name%%.*}"
 			# base_name_without_ext: chimeraos-48-8_624ba25-gnome-nv, get gnome-nv
 			suffix=$(echo "$base_name_without_ext" | sed 's/.*[0-9]_[^-]*-//')
 			source="${DEFAULT_REPO}:${DEFAULT_BRANCH}:${suffix}"
