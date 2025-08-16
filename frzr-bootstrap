@@ -132,12 +132,66 @@ function select_disk() {
 }
 
 function check_existing_installation() {
-	if (lsblk -o label "${DISK}" | grep -q frzr_efi); then
-		echo "检测到现有frzr安装"
+	local has_efi=$(lsblk -o label "${DISK}" | grep -c "frzr_efi" 2>/dev/null || echo "0")
+	local has_root=$(lsblk -o label "${DISK}" | grep -c "frzr_root" 2>/dev/null || echo "0")
+	
+	if [ "$has_efi" -gt 0 ] && [ "$has_root" -gt 0 ]; then
+		echo "检测到完整的frzr安装 (EFI: $has_efi, Root: $has_root)"
 		return 0
+	elif [ "$has_efi" -gt 0 ] || [ "$has_root" -gt 0 ]; then
+		echo "检测到不完整的frzr安装残留 (EFI: $has_efi, Root: $has_root)"
+		
+		# 显示清理选项
+		if whiptail --yesno \
+			"检测到不完整的frzr安装残留：\n• frzr_efi 分区: $has_efi 个\n• frzr_root 分区: $has_root 个\n\n这可能是之前安装失败的结果。\n建议清理残留分区后重新安装。\n\n是否清理残留分区？" \
+			14 70 3>&1 1>&2 2>&3; then
+			cleanup_incomplete_installation
+			echo "残留分区已清理，当作新安装处理"
+		else
+			echo "用户选择保留残留分区，当作现有安装处理"
+			return 0
+		fi
+		return 1  # 清理后当作"无现有安装"
 	else
 		echo "未检测到现有frzr安装"
 		return 1
+	fi
+}
+
+function cleanup_incomplete_installation() {
+	echo "清理不完整的frzr安装..."
+	
+	# 获取所有frzr相关分区
+	local frzr_partitions=$(lsblk -rno "path,label" "${DISK}" | awk '$2 ~ /^frzr_/ {print $1}')
+	
+	if [ -n "$frzr_partitions" ]; then
+		echo "发现以下frzr分区："
+		echo "$frzr_partitions"
+		
+		echo "$frzr_partitions" | while read -r partition; do
+			if [ -n "$partition" ]; then
+				local part_num=$(echo "$partition" | sed 's/.*[^0-9]\([0-9]\+\)$/\1/')
+				echo "删除分区: $partition (分区号: $part_num)"
+				
+				# 卸载分区
+				umount "$partition" 2>/dev/null || true
+				
+				# 删除分区
+				if parted "$DISK" rm "$part_num" 2>/dev/null; then
+					echo "已删除分区: $partition"
+				else
+					echo "删除分区失败: $partition"
+				fi
+			fi
+		done
+		
+		# 刷新分区表
+		partprobe "$DISK"
+		sleep 2
+		
+		echo "frzr残留分区清理完成"
+	else
+		echo "未找到需要清理的frzr分区"
 	fi
 }
 
@@ -803,22 +857,62 @@ function create_dual_boot_partitions() {
 			return 1
 		fi
 
-		# 创建根分区
-		if ! parted --script "$DISK" mkpart primary "$((efi_end_sectors + 1))s" "${ACTUAL_END_SECTORS}s"; then
-			echo "创建根分区失败"
-			return 1
-		fi
-
-		# 重新读取分区表
+		# 刷新分区表并立即设置EFI分区
 		partprobe "$DISK"
 		sleep 1
-
+		
 		# 通过起始位置找到EFI分区编号
 		local efi_part_num=$(parted "$DISK" unit s print | awk -v start="$buffer_start_sectors" '$2 ~ start {print $1}')
 		if ! parted "$DISK" set "$efi_part_num" esp on; then
 			echo "设置EFI分区标志失败"
 			return 1
 		fi
+		
+		# 构造EFI分区路径并立即格式化+设置标签
+		local temp_efi_part
+		if [[ "$DISK" == *"nvme"* ]]; then
+			temp_efi_part="${DISK}p${efi_part_num}"
+		else
+			temp_efi_part="${DISK}${efi_part_num}"
+		fi
+		
+		echo "格式化EFI分区并设置标签..."
+		if ! mkfs.vfat "$temp_efi_part"; then
+			echo "创建EFI文件系统失败"
+			return 1
+		fi
+		
+		if ! dosfslabel "$temp_efi_part" frzr_efi; then
+			echo "设置EFI分区标签失败"
+			return 1
+		fi
+		echo "EFI分区标签设置完成"
+
+		# 创建根分区
+		if ! parted --script "$DISK" mkpart primary "$((efi_end_sectors + 1))s" "${ACTUAL_END_SECTORS}s"; then
+			echo "创建根分区失败"
+			return 1
+		fi
+
+		# 刷新分区表并立即设置根分区
+		partprobe "$DISK"
+		sleep 1
+		
+		# 通过起始位置找到根分区编号并构造路径
+		local root_part_num=$(parted "$DISK" unit s print | awk -v start="$((efi_end_sectors + 1))" '$2 ~ start {print $1}')
+		local temp_root_part
+		if [[ "$DISK" == *"nvme"* ]]; then
+			temp_root_part="${DISK}p${root_part_num}"
+		else
+			temp_root_part="${DISK}${root_part_num}"
+		fi
+		
+		echo "格式化根分区并设置标签..."
+		if ! mkfs.btrfs -L frzr_root -f "$temp_root_part"; then
+			echo "创建BTRFS文件系统失败"
+			return 1
+		fi
+		echo "根分区标签设置完成"
 
 	else
 		echo "未找到未分配空间" >&2
@@ -855,21 +949,8 @@ function create_dual_boot_partitions() {
 function setup_dual_boot_filesystem() {
 	mkdir -p "${MOUNT_PATH}"
 
-	# 创建并格式化分区
-	if ! mkfs.btrfs -L frzr_root -f "${FRZR_ROOT_PART}"; then
-		echo "创建BTRFS文件系统失败"
-		return 1
-	fi
-
-	if ! mkfs.vfat "${FRZR_EFI_PART}"; then
-		echo "创建EFI文件系统失败"
-		return 1
-	fi
-
-	if ! dosfslabel "${FRZR_EFI_PART}" frzr_efi; then
-		echo "设置EFI分区标签失败"
-		return 1
-	fi
+	# 分区格式化和标签设置已在create_dual_boot_partitions中完成
+	echo "分区已格式化，开始挂载和设置文件系统结构..."
 
 	# 挂载分区
 	if ! mount -t btrfs -o nodatacow "${FRZR_ROOT_PART}" "${MOUNT_PATH}"; then
