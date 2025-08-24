@@ -8,7 +8,7 @@ if [[ -n "${DEBUG}" ]]; then
 	set -x
 fi
 
-DEFAULT_REPO="3003n/chimeraos"
+DEFAULT_REPO="3003n/skorionos"
 DEFAULT_BRANCH="stable"
 DEFAULT_SOURCE="${DEFAULT_REPO}:${DEFAULT_BRANCH}:gnome"
 
@@ -387,7 +387,7 @@ get_boot_to_delete() {
 
 	local TO_BOOT=$(get_next_boot_deployment ${current_version} ${boot_cfg_path})
 
-	ls -1 ${boot_path} | grep 'chimeraos-*_*' | grep -v ${current_version} | grep -v ${TO_BOOT} || echo
+	ls -1 ${boot_path} | grep -E '(chimeraos|skorionos)-*_*' | grep -v ${current_version} | grep -v ${TO_BOOT} || echo
 }
 
 get_next_boot_deployment() {
@@ -568,16 +568,16 @@ get_env_from_conf() {
 
 function get_branch() {
     local deployment=$1
-    # chimeraos-48-8_624ba25-cosmic -> cosmic
-    # chimeraos-48-8_624ba25-kde-nv -> kde
+    # (chimeraos|skorionos)-48-8_624ba25-cosmic -> cosmic
+    # (chimeraos|skorionos)-48-8_624ba25-kde-nv -> kde
     echo "$deployment" | awk -F '_' '{print $NF}' | awk -F '-' '{print $2}'
 }
 
 get_version_from_name() {
     local name=$1
-    # chimeraos-50-4_5d150d2-gnome-nv -> 50-4_5d150d2
-    # chimeraos-48-8_624ba25-cosmic -> 48-8_624ba25
-    echo "$name" | sed -n 's/chimeraos-\([0-9]\+-[0-9]\+_[a-f0-9]\+\)-.*/\1/p'
+    # (chimeraos|skorionos)-50-4_5d150d2-gnome-nv -> 50-4_5d150d2
+    # (chimeraos|skorionos)-48-8_624ba25-cosmic -> 48-8_624ba25
+    echo "$name" | sed -n 's/(chimeraos|skorionos)-\([0-9]\+-[0-9]\+_[a-f0-9]\+\)-.*/\1/p'
 }
 
 get_frzr_release() {
@@ -686,9 +686,9 @@ main() {
 			echo "$FRZR_SOURCE" >"${MOUNT_PATH}/source"
 		else
 			base_name=$(basename "${FRZR_SOURCE}")
-			# base_name: chimeraos-48-8_624ba25-gnome-nv.img.tar.xz
+			# base_name: (chimeraos|skorionos)-48-8_624ba25-gnome-nv.img.tar.xz
 			base_name_without_ext="${base_name%%.*}"
-			# base_name_without_ext: chimeraos-48-8_624ba25-gnome-nv, get gnome-nv
+			# base_name_without_ext: (chimeraos|skorionos)-48-8_624ba25-gnome-nv, get gnome-nv
 			suffix=$(echo "$base_name_without_ext" | sed 's/.*[0-9]_[^-]*-//')
 			source="${DEFAULT_REPO}:${DEFAULT_BRANCH}:${suffix}"
 			echo "$source" >"${MOUNT_PATH}/source"
@@ -1074,8 +1074,8 @@ main() {
 
 	# 先检查是否存在匹配项
 	CURRENT_RELEASE=$(get_frzr_release)
-	if btrfs subvolume list ${MOUNT_PATH} 2>/dev/null | grep -q "deployments/chimeraos"; then
-		current_deploys_array=($(btrfs subvolume list ${MOUNT_PATH} | grep "deployments/chimeraos" | awk '{print $9}'))
+	if btrfs subvolume list ${MOUNT_PATH} 2>/dev/null | grep -q -E "deployments/(chimeraos|skorionos)"; then
+		current_deploys_array=($(btrfs subvolume list ${MOUNT_PATH} | grep -E "deployments/(chimeraos|skorionos)" | awk '{print $9}'))
 		for current_deploy in "${current_deploys_array[@]}"; do
 			if [ "${current_deploy}" == "deployments/${CURRENT_RELEASE}" ]; then
 				continue
