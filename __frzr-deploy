@@ -934,8 +934,14 @@ main() {
 
 		# 筛选包含BRANCH的URL
 		if [ -n "$BRANCH" ]; then
-		    FILTERED_URLS=$(echo "$IMG_LIST_URL" | tr ' ' '\n' | grep -i "\-${BRANCH}\.")
-		    echo "$FILTERED_URLS" >&2
+		    # FILTERED_URLS=$(echo "$IMG_LIST_URL" | tr ' ' '\n' | grep -i "\-${BRANCH}\.")
+		    # echo "$FILTERED_URLS" >&2
+			if echo "$IMG_LIST_URL" | grep -q "\-${BRANCH}\."; then
+				FILTERED_URLS=$(echo "$IMG_LIST_URL" | tr ' ' '\n' | grep -i "\-${BRANCH}\.")
+				echo "$FILTERED_URLS" >&2
+			else
+				echo "没有找到包含 '$BRANCH' 的URL" >&2
+			fi
 
 		    # 选择第一个匹配的URL
 		    SELECTED_URL=$(echo "$FILTERED_URLS" | head -n 1)
