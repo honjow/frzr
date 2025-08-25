@@ -891,15 +891,15 @@ main() {
 		fi
 
 		BASE_URL=$(dirname "$(echo "${IMG_LIST_URL}" | cut -d' ' -f1)")
+
+		echo "BASE_URL: ${BASE_URL}" >&2
 		
 		# 优先尝试 Gitee 校验文件
 		IMG_LIST_STR=""
 		if [[ "$enable_gitee_checksum" == "true" ]]; then
-			# 从 IMG_LIST_URL 提取文件名，然后提取版本信息
-			IMG_FILE_NAME=$(basename "$(echo "${IMG_LIST_URL}" | cut -d' ' -f1)" | sed 's/-[0-9]*$//')
-			NAME_FOR_VERSION=$(echo "${IMG_FILE_NAME}" | cut -f 1 -d '.')
-			VERSION_PATH=$(get_version_from_name "${NAME_FOR_VERSION}")
-			echo "IMG_FILE_NAME: ${IMG_FILE_NAME}, NAME_FOR_VERSION: ${NAME_FOR_VERSION}, VERSION_PATH: ${VERSION_PATH}" >&2
+			VERSION_PATH=$(basename "${BASE_URL}")
+
+			echo "VERSION_PATH: ${VERSION_PATH}, BRANCH: ${BRANCH}" >&2
 			
 			if [[ -n "$VERSION_PATH" && -n "$BRANCH" ]]; then
 				GITEE_CHECKSUM_URL="https://gitee.com/honjow/sk-api-info/raw/master/sk-chimeraos/checksum/${VERSION_PATH}/sha256sum-${BRANCH}.txt"
@@ -934,7 +934,6 @@ main() {
 
 		# 筛选包含BRANCH的URL
 		if [ -n "$BRANCH" ]; then
-			echo "BRANCH: ${BRANCH}" >&2
 		    # FILTERED_URLS=$(echo "$IMG_LIST_URL" | tr ' ' '\n' | grep -i "\-${BRANCH}\.")
 		    # echo "$FILTERED_URLS" >&2
 			if echo "$IMG_LIST_URL" | grep -q "\-${BRANCH}\."; then
