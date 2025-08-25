@@ -999,7 +999,7 @@ main() {
 
 			# if the fallback url is not empty, set the img_url to the fallback url
 			if [[ -n "$FALLBACK_URL" ]]; then
-				# echo "Fallback URL: ${FALLBACK_URL}" >&2
+				echo "Fallback URL: ${FALLBACK_URL}" >&2
 				SUB_IMG_URL="${FALLBACK_URL}"
 			fi
 
