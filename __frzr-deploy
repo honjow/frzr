@@ -557,7 +557,7 @@ get_env_from_conf() {
 	# 获取 uid 1000 的用户目录
 	home_dir=$(getent passwd 1000 2>/dev/null | cut -d: -f6)
 	echo "Home directory: ${home_dir}"
-	sleep 3
+	sleep 1
 	if [[ -d "${home_dir}/.config/environment.d" ]]; then
 		for i in "${home_dir}"/.config/environment.d/*.conf; do
 			[[ -f "${i}" ]] && . "${i}"
@@ -917,7 +917,7 @@ main() {
 		fi
 		
 		# 如果 Gitee 校验文件失败或未启用，使用原有方法
-		if [[ -z "$IMG_LIST_STR" ]]; then
+		if [[ -z "$IMG_LIST_STR" ]] || echo "$IMG_LIST_STR" | grep -q "not found"; then
 			if [ -n "$BRANCH" ]; then
 				CHECKSUM_URL="${BASE_URL}/sha256sum-${BRANCH}.txt"
 				echo "正在从原始源获取校验文件: ${CHECKSUM_URL}" >&2
@@ -931,6 +931,7 @@ main() {
 
 		echo "$IMG_LIST_STR" >&2
 		CHECKSUM_LIST=$(echo "$IMG_LIST_STR" | awk '{print $1}')
+		echo "CHECKSUM_LIST: ${CHECKSUM_LIST}" >&2
 
 		# 筛选包含BRANCH的URL
 		if [ -n "$BRANCH" ]; then
