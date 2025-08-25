@@ -934,30 +934,27 @@ main() {
 
 		# 筛选包含BRANCH的URL
 		if [ -n "$BRANCH" ]; then
-		    # FILTERED_URLS=$(echo "$IMG_LIST_URL" | tr ' ' '\n' | grep -i "\-${BRANCH}\.")
-		    # echo "$FILTERED_URLS" >&2
 			if echo "$IMG_LIST_URL" | grep -q "\-${BRANCH}\."; then
 				FILTERED_URLS=$(echo "$IMG_LIST_URL" | tr ' ' '\n' | grep -i "\-${BRANCH}\.")
-				echo "$FILTERED_URLS" >&2
 			else
 				echo "没有找到包含 '$BRANCH' 的URL" >&2
 			fi
 
+			echo -e "ori urls: \n${FILTERED_URLS}" >&2
+
 		    # 选择第一个匹配的URL
 		    SELECTED_URL=$(echo "$FILTERED_URLS" | head -n 1)
 
-		    if [ -n "$SELECTED_URL" ]; then
-		        IMG_LIST_URL="$SELECTED_URL"
-		    else
+		    if [ -z "$SELECTED_URL" ]; then
 		        echo "警告: 没有找到包含 '$BRANCH' 的URL，使用原始URL列表的第一个URL" >&2
-		        IMG_LIST_URL=$(echo "$IMG_LIST_URL" | cut -d' ' -f1)
+		        SELECTED_URL=$(echo "$IMG_LIST_URL" | cut -d' ' -f1)
 		    fi
 		else
 		    # 如果没有指定BRANCH，使用第一个URL
-		    IMG_LIST_URL=$(echo "$IMG_LIST_URL" | cut -d' ' -f1)
+		    SELECTED_URL=$(echo "$IMG_LIST_URL" | cut -d' ' -f1)
 		fi
 
-		IMG_FILE_NAME=$(basename ${IMG_LIST_URL} | sed 's/-[0-9]*$//')
+		IMG_FILE_NAME=$(basename ${SELECTED_URL} | sed 's/-[0-9]*$//')
 		NAME=$(echo "${IMG_FILE_NAME}" | cut -f 1 -d '.')
 		SUBVOL="${DEPLOY_PATH}/${NAME}"
 		IMG_FILE="${MOUNT_PATH}/${IMG_FILE_NAME}"
@@ -965,30 +962,43 @@ main() {
 		SER=0
 		TOTAL=$(echo "$CHECKSUM_LIST" | wc -l)
 
+		if [ $FRZR_CHECK_UPDATE -eq 1 ]; then
+			# echo "check update" >&2
+			for CHECKSUM in $CHECKSUM_LIST; do
+				FILE_NAME=$(echo "$IMG_LIST_STR" | grep $CHECKSUM | awk '{print $2}')
+				if [[ "$enable_fallback_url" == "true" ]]; then
+					FALLBACK_URL_AL=$(get_fallback_url_alist "${FILE_NAME}")
+					if [[ -n "$FALLBACK_URL_AL" ]]; then
+						FALLBACK_URL="${FALLBACK_URL_AL}"
+					else
+						FALLBACK_URL=""
+					fi
+					if [[ -n "$FALLBACK_URL" ]]; then
+						echo "Use Fallback URL: ${FALLBACK_URL}" >&2
+					fi
+				fi
+			done
+		fi
+
 		for CHECKSUM in $CHECKSUM_LIST; do
 
 			FILE_NAME=$(echo "$IMG_LIST_STR" | grep $CHECKSUM | awk '{print $2}')
 			SUB_IMG_FILE="${MOUNT_PATH}/${FILE_NAME}"
 			SUB_IMG_URL="${BASE_URL}/${FILE_NAME}"
 
+			# echo "enable_fallback_url: ${enable_fallback_url}" >&2
 			if [[ "$enable_fallback_url" == "true" ]]; then
 				FALLBACK_URL_AL=$(get_fallback_url_alist "${FILE_NAME}")
 				if [[ -n "$FALLBACK_URL_AL" ]]; then
 					FALLBACK_URL="${FALLBACK_URL_AL}"
 				else
-					# FALLBACK_URL_JL=$(get_fallback_url_justlist "${BASE_URL}" "${FILE_NAME}")
-					# if [[ -n "$FALLBACK_URL_JL" ]]; then
-					# 	FALLBACK_URL="${FALLBACK_URL_JL}"
-					# fi
 					FALLBACK_URL=""
 				fi
 			fi
 
 			# if the fallback url is not empty, set the img_url to the fallback url
 			if [[ -n "$FALLBACK_URL" ]]; then
-				if [[ ! $FRZR_CHECK_UPDATE -eq 1 ]]; then
-					echo "Fallback URL: ${FALLBACK_URL}"
-				fi
+				# echo "Fallback URL: ${FALLBACK_URL}" >&2
 				SUB_IMG_URL="${FALLBACK_URL}"
 			fi
 
@@ -998,9 +1008,6 @@ main() {
 			fi
 
 			if [ $FRZR_CHECK_UPDATE -eq 1 ]; then
-				# if [[ -n "$FALLBACK_URL" ]]; then
-				# 	fallback_msg="(with_fallback)"
-				# fi
 				if [[ -n "$FALLBACK_URL_AL" ]]; then
 					fallback_msg="(alist)"
 				fi
