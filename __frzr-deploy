@@ -1015,7 +1015,7 @@ main() {
 
 		echo "$IMG_LIST_STR" >&2
 		CHECKSUM_LIST=$(echo "$IMG_LIST_STR" | awk '{print $1}')
-		echo -e "CHECKSUM_LIST: \n${CHECKSUM_LIST}" >&2
+		# echo -e "CHECKSUM_LIST: \n${CHECKSUM_LIST}" >&2
 
 		# 筛选包含BRANCH的URL
 		if [ -n "$BRANCH" ]; then
@@ -1025,7 +1025,7 @@ main() {
 				echo "没有找到包含 '$BRANCH' 的URL" >&2
 			fi
 
-			echo -e "ori urls: \n${FILTERED_URLS}" >&2
+			echo -e "原始下载URL: \n${FILTERED_URLS}" >&2
 
 		    # 选择第一个匹配的URL
 		    SELECTED_URL=$(echo "$FILTERED_URLS" | head -n 1)
@@ -1059,7 +1059,7 @@ main() {
 						FALLBACK_URL=""
 					fi
 					if [[ -n "$FALLBACK_URL" ]]; then
-						echo "Use Fallback URL: ${FALLBACK_URL}" >&2
+						echo "使用备用下载 URL: ${FALLBACK_URL}" >&2
 					fi
 				fi
 			done
@@ -1083,7 +1083,7 @@ main() {
 
 			# if the fallback url is not empty, set the img_url to the fallback url
 			if [[ -n "$FALLBACK_URL" ]]; then
-				echo "Fallback URL: ${FALLBACK_URL}" >&2
+				echo "备用下载 URL: ${FALLBACK_URL}" >&2
 				SUB_IMG_URL="${FALLBACK_URL}"
 			fi
 
