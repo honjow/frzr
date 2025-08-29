@@ -559,7 +559,7 @@ validate_checksum_format() {
 	fi
 	
 	# 检查是否包含明显的错误信息
-	if echo "$checksum_content" | grep -qi -E "(404|not found|error|<!DOCTYPE|<html|<head)"; then
+	if echo "$checksum_content" | grep -qi -E "(404|not found|error|<!DOCTYPE|<html|<head)" 2>/dev/null; then
 		echo "校验文件包含错误信息或HTML内容" >&2
 		return 1
 	fi
@@ -616,10 +616,10 @@ try_checksum_mirrors() {
 		local checksum_url="${mirror}${version_path}/sha256sum-${branch}.txt"
 		echo "正在从镜像站获取校验文件: ${checksum_url}" >&2
 		
-		local content=$(curl --http1.1 -L -s --connect-timeout 15 -m 15 "${checksum_url}")
-		local curl_status=$?
-		
-		if [[ $curl_status -eq 0 && -n "$content" && ! "$content" =~ "404" ]]; then
+		local content curl_status
+		content=$(curl --http1.1 -L -s --connect-timeout 15 -m 15 "${checksum_url}" 2>/dev/null) || curl_status=$?
+		curl_status=${curl_status:-0}
+		if [[ $curl_status -eq 0 && -n "$content" ]]; then
 			echo "镜像站校验文件获取成功，正在验证格式..." >&2
 			if validate_checksum_format "$content"; then
 				echo "镜像站 ${mirror} 校验文件格式验证通过" >&2
@@ -926,7 +926,9 @@ main() {
 		# 优先尝试API镜像站
 		if [[ "$enable_gitee_api" == "true" ]]; then
 			RELEASES=$(try_api_mirrors)
-			if [[ $? -ne 0 ]]; then
+			if [[ $? -eq 0 && -n "$RELEASES" ]]; then
+				status=0
+			else
 				RELEASES=""
 			fi
 		fi
