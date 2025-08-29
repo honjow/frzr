@@ -637,6 +637,34 @@ try_checksum_mirrors() {
 	return 1
 }
 
+# 尝试多个API镜像站
+try_api_mirrors() {
+	# API镜像站列表（按优先级顺序）
+	local api_mirrors=(
+		"https://raw.gitcode.com/honjow/sk-api-info/raw/master/skorionos/release.json"
+		"https://gitee.com/honjow/sk-api-info/raw/master/sk-chimeraos/release.json"
+	)
+	
+	for mirror in "${api_mirrors[@]}"; do
+		echo "尝试API镜像站: ${mirror}" >&2
+		echo "正在从镜像站获取发布信息: ${mirror}" >&2
+		
+		local releases=$(curl --http1.1 -L -s --connect-timeout 60 -m 60 "${mirror}")
+		local curl_status=$?
+		
+		if [[ $curl_status -eq 0 && -n "$releases" && "${releases:0:1}" == "[" ]]; then
+			echo "API镜像站 ${mirror} 获取成功" >&2
+			echo "$releases"
+			return 0
+		else
+			echo "API镜像站 ${mirror} 获取失败 (状态码: $curl_status)" >&2
+		fi
+	done
+	
+	echo "所有API镜像站都失败，将使用GitHub源" >&2
+	return 1
+}
+
 get_env_from_conf() {
 	set -a
 	for i in "${HOME}"/.config/environment.d/*.conf; do
@@ -895,21 +923,15 @@ main() {
 		set +e
 		set +x
 		
-		# 优先尝试 Gitee API
+		# 优先尝试API镜像站
 		if [[ "$enable_gitee_api" == "true" ]]; then
-			GITEE_API_URL="https://gitee.com/honjow/sk-api-info/raw/master/sk-chimeraos/release.json"
-			echo "正在从 Gitee 获取发布信息: ${GITEE_API_URL}" >&2
-			RELEASES=$(curl --http1.1 -L -s --connect-timeout 60 -m 60 "${GITEE_API_URL}")
-			status=$?
-			if [[ $status -eq 0 && -n "$RELEASES" && "${RELEASES:0:1}" == "[" ]]; then
-				echo "Gitee 发布信息获取成功" >&2
-			else
-				echo "Gitee 发布信息获取失败[$status]，使用 GitHub 源" >&2
+			RELEASES=$(try_api_mirrors)
+			if [[ $? -ne 0 ]]; then
 				RELEASES=""
 			fi
 		fi
 		
-		# 如果 Gitee API 失败或未启用，使用原有的 GitHub API
+		# 如果API镜像站失败或未启用，使用原有的 GitHub API
 		if [[ -z "$RELEASES" ]]; then
 			echo "正在从 GitHub 获取发布信息: ${RELEASES_API_URL}" >&2
 			if [[ -n "$HEADER" ]]; then
