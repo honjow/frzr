@@ -548,6 +548,57 @@ get_fallback_url_alist() {
 	fi
 }
 
+# 验证校验文件内容格式是否符合SHA256规范
+validate_checksum_format() {
+	local checksum_content="$1"
+	
+	# 检查内容是否为空
+	if [[ -z "$checksum_content" ]]; then
+		echo "校验文件内容为空" >&2
+		return 1
+	fi
+	
+	# 检查是否包含明显的错误信息
+	if echo "$checksum_content" | grep -qi -E "(404|not found|error|<!DOCTYPE|<html|<head)"; then
+		echo "校验文件包含错误信息或HTML内容" >&2
+		return 1
+	fi
+	
+	local valid_lines=0
+	local total_lines=0
+	
+	# 逐行检查格式
+	while IFS= read -r line || [[ -n "$line" ]]; do
+		# 跳过空行和注释行
+		if [[ -z "$line" ]] || [[ "$line" =~ ^[[:space:]]*# ]]; then
+			continue
+		fi
+		
+		total_lines=$((total_lines + 1))
+		
+		# 检查行格式：SHA256哈希值(64个十六进制字符) + 空格 + 文件名
+		if [[ "$line" =~ ^[a-fA-F0-9]{64}[[:space:]]+[^[:space:]]+.*$ ]]; then
+			valid_lines=$((valid_lines + 1))
+		else
+			echo "无效的校验文件行格式: $line" >&2
+		fi
+	done <<< "$checksum_content"
+	
+	# 至少需要有一行有效的校验信息
+	if [[ $valid_lines -eq 0 ]]; then
+		echo "校验文件中没有找到有效的SHA256校验行" >&2
+		return 1
+	fi
+	
+	# 如果有无效行，给出警告但不失败
+	if [[ $valid_lines -lt $total_lines ]]; then
+		echo "警告: 校验文件中有 $((total_lines - valid_lines)) 行格式不正确" >&2
+	fi
+	
+	echo "校验文件格式验证通过，有效行数: $valid_lines" >&2
+	return 0
+}
+
 get_env_from_conf() {
 	set -a
 	for i in "${HOME}"/.config/environment.d/*.conf; do
@@ -906,7 +957,14 @@ main() {
 				echo "正在从 Gitee 获取校验文件: ${GITEE_CHECKSUM_URL}" >&2
 				IMG_LIST_STR="$(curl --http1.1 -L -s --connect-timeout 15 -m 15 "${GITEE_CHECKSUM_URL}")"
 				if [[ $? -eq 0 && -n "$IMG_LIST_STR" && ! "$IMG_LIST_STR" =~ "404" ]]; then
-					echo "Gitee 校验文件获取成功" >&2
+					echo "Gitee 校验文件获取成功，正在验证格式..." >&2
+					# 验证校验文件格式
+					if validate_checksum_format "$IMG_LIST_STR"; then
+						echo "Gitee 校验文件格式验证通过" >&2
+					else
+						echo "Gitee 校验文件格式验证失败，使用原有方式" >&2
+						IMG_LIST_STR=""
+					fi
 				else
 					echo "Gitee 校验文件获取失败，使用原有方式" >&2
 					IMG_LIST_STR=""
@@ -931,7 +989,7 @@ main() {
 
 		echo "$IMG_LIST_STR" >&2
 		CHECKSUM_LIST=$(echo "$IMG_LIST_STR" | awk '{print $1}')
-		echo "CHECKSUM_LIST: ${CHECKSUM_LIST}" >&2
+		echo -e "CHECKSUM_LIST: \n${CHECKSUM_LIST}" >&2
 
 		# 筛选包含BRANCH的URL
 		if [ -n "$BRANCH" ]; then
