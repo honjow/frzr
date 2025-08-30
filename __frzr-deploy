@@ -607,6 +607,7 @@ try_checksum_mirrors() {
 	# 校验文件镜像站列表（按优先级顺序）
 	local mirrors=(
 		"https://gitee.com/honjow/sk-api-info/raw/master/sk-chimeraos/checksum/"
+		"https://gitea.switchsystem.eu.org/honjow/sk-api-info/raw/branch/master/skorionos/checksum/"
 		"https://raw.gitcode.com/honjow/sk-api-info/raw/master/skorionos/checksum/"
 	)
 	
@@ -642,6 +643,7 @@ try_api_mirrors() {
 	# API镜像站列表（按优先级顺序）
 	local api_mirrors=(
 		"https://gitee.com/honjow/sk-api-info/raw/master/sk-chimeraos/release.json"
+		"https://gitea.switchsystem.eu.org/honjow/sk-api-info/raw/branch/master/skorionos/release.json"
 		"https://raw.gitcode.com/honjow/sk-api-info/raw/master/skorionos/release.json"
 	)
 	
