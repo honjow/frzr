@@ -113,7 +113,7 @@ get_img_url() {
 		else
 			result=$stable_download_url
 		fi
-		echo "result: $result" >&2
+		# echo "result: $result" >&2
 	else
 		# 如果 CHANNEL 以 -任意字符结尾
 		if [[ "$CHANNEL" =~ -[^-]*$ ]]; then
@@ -186,7 +186,7 @@ get_img_url() {
 		else
 			result=$stable_download_url
 		fi
-		echo "result: $result" >&2
+		# echo "result: $result" >&2
 	fi
 
 	echo $result
@@ -992,7 +992,7 @@ main() {
 		if [[ -n "${DEBUG}" ]]; then
 			set -x
 		fi
-		echo "IMG_LIST_URL: ${IMG_LIST_URL}" >&2
+		# echo "IMG_LIST_URL: ${IMG_LIST_URL}" >&2
 
 		# if [ -f "${GITHUB_CDN_FILE}" ]; then
 		# 	img_cdns=($(get_conf_value "${GITHUB_CDN_FILE}" "release" "server"))
