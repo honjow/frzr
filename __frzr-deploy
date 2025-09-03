@@ -199,7 +199,7 @@ handle_multipart_image() {
     local dir_name=$(dirname "$base_file")
     
     # 首先检查新格式（.partN-T）
-    local first_part=$(find "$dir_name" -maxdepth 1 -type f -name "${base_name_no_ext}.part1-*.img.*" | head -n1)
+    local first_part=$(find "$dir_name" -maxdepth 1 -type f -name "${base_name_no_ext}.part1-*.*" | head -n1)
     if [ -n "$first_part" ]; then
 		# 获取去除部分（partN-T）的实际后缀名
 		local real_ext=$(echo "$first_part" | sed "s/.*${base_name_no_ext}\.part1-[0-9]\+//")
@@ -1241,7 +1241,7 @@ main() {
 		btrfs receive --quiet ${DEPLOY_PATH} <${IMG_FILE}
 	elif [[ "${IMG_FILE##*.}" == "zst" ]]; then
 		zstd -d -c ${IMG_FILE} | btrfs receive --quiet ${DEPLOY_PATH}
-	elif [[ "${IMG_FILE##*.}" == "xz" ]]; then
+	elif [[ "${IMG_FILE##*.}" == "xz" || "${IMG_FILE##*.}" == "skosys" ]]; then
 		if [[ "${IMG_FILE}" == *".tar.xz" ]]; then
 			tar xfO ${IMG_FILE} | btrfs receive --quiet ${DEPLOY_PATH}
 		else
