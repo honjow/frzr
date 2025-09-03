@@ -5,14 +5,17 @@ source ../__frzr-deploy
 set -e
 
 REPO="3003n/chimeraos"
-CHANNEL="matrix"
-BRANCH="kde"
+CHANNEL="testing"
+BRANCH="hyprland"
 
 # CHANNEL="gnome_nvidia"
 # BRANCH=""
 
-RELEASES_API_URL="https://api.github.com/repos/${REPO}/releases?per_page=100"
+# RELEASES_API_URL="https://api.github.com/repos/${REPO}/releases?per_page=100"
+RELEASES_API_URL="https://gitee.com/honjow/sk-api-info/raw/master/sk-chimeraos/release.json"
 RELEASES=$(curl --http1.1 -L -s --connect-timeout 15 -m 15 "${RELEASES_API_URL}")
+
+# echo "RELEASES: $RELEASES"
 
 IMG_LIST_URL=$(echo $RELEASES | get_img_url "${CHANNEL}")
 

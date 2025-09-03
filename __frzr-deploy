@@ -27,7 +27,7 @@ decode_config
 
 get_img_url() {
 	CHANNEL=$1
-	local keywords="img"
+	local keywords="img|skosys"
 
 	echo "CHANNEL: $CHANNEL" >&2
 
@@ -97,7 +97,15 @@ get_img_url() {
 						.browser_download_url'
 			)
 
-			if [ "$(date -d $testing_release_date +%s)" -le "$(date -d $stable_release_date +%s)" ]; then
+			echo "testing_release_date: $testing_release_date" >&2
+			echo "stable_release_date: $stable_release_date" >&2
+			testing_release_time=$(date -d $testing_release_date +%s)
+			stable_release_time=$(date -d $stable_release_date +%s)
+
+			echo "testing_release_time: $testing_release_time" >&2
+			echo "stable_release_time: $stable_release_time" >&2
+
+			if [[ $testing_release_time -le $stable_release_time ]]; then
 				result=$stable_download_url
 			else
 				result=$testing_url
@@ -105,6 +113,7 @@ get_img_url() {
 		else
 			result=$stable_download_url
 		fi
+		echo "result: $result" >&2
 	else
 		# 如果 CHANNEL 以 -任意字符结尾
 		if [[ "$CHANNEL" =~ -[^-]*$ ]]; then
@@ -162,13 +171,13 @@ get_img_url() {
 			unstable_release_time=$(date -d $unstable_release_date +%s)
 			stable_release_time=$(date -d $stable_release_date +%s)
 
-			# echo "unstable_release_time: $unstable_release_time" >&2
-			# echo "stable_release_time: $stable_release_time" >&2
+			echo "unstable_release_time: $unstable_release_time" >&2
+			echo "stable_release_time: $stable_release_time" >&2
 
 			# echo "unstable_url is $unstable_url" >&2
 
 			# CHANNEL 为 unstable 或者 CHANNEL_STABLE 不为空, 并且 unstable_release_time 小于等于 stable_release_time
-			if [[ "$CHANNEL" == "unstable" || -n "$CHANNEL_STABLE" ]] && [ $unstable_release_time -le $stable_release_time ]; then
+			if [[ "$CHANNEL" == "unstable" || -n "$CHANNEL_STABLE" ]] && [[ $unstable_release_time -le $stable_release_time ]]; then
 				result=$stable_download_url
 			else
 				result=$unstable_url
@@ -177,6 +186,7 @@ get_img_url() {
 		else
 			result=$stable_download_url
 		fi
+		echo "result: $result" >&2
 	fi
 
 	echo $result
@@ -982,18 +992,33 @@ main() {
 		if [[ -n "${DEBUG}" ]]; then
 			set -x
 		fi
+		echo "IMG_LIST_URL: ${IMG_LIST_URL}" >&2
 
-		if [ -f "${GITHUB_CDN_FILE}" ]; then
-			img_cdns=($(get_conf_value "${GITHUB_CDN_FILE}" "release" "server"))
-			if [[ -n "${img_cdns}" && "$enable_release_cdn" == "true" ]]; then
-				IMG_CND=$(get_random_value "${img_cdns[@]}")
-				echo "# Release: ${IMG_CND} #"
+		# if [ -f "${GITHUB_CDN_FILE}" ]; then
+		# 	img_cdns=($(get_conf_value "${GITHUB_CDN_FILE}" "release" "server"))
+		# 	if [[ -n "${img_cdns}" && "$enable_release_cdn" == "true" ]]; then
+		# 		IMG_CND=$(get_random_value "${img_cdns[@]}")
+		# 		echo "# Release: ${IMG_CND} #"
+		# 		IMG_LIST_URL=$(echo "${IMG_LIST_URL}" | sed "s#^https://.*/${REPO}#${IMG_CND}/${REPO}#")
+		# 	fi
+		# fi
+
+		if [[ "$enable_release_cdn" == "true" ]]; then
+			if [[ -f "${GITHUB_CDN_FILE}" ]]; then
+				img_cdns=($(get_conf_value "${GITHUB_CDN_FILE}" "release" "server"))
+				if [[ ${#img_cdns[@]} -gt 0 ]]; then
+					for img_cdn in "${img_cdns[@]}"; do
+						echo "img_cdn: ${img_cdn}" >&2
+					done
+					IMG_CND=$(get_random_value "${img_cdns[@]}")
+					echo "# Release: ${IMG_CND} #"
+				fi
 				IMG_LIST_URL=$(echo "${IMG_LIST_URL}" | sed "s#^https://.*/${REPO}#${IMG_CND}/${REPO}#")
 			fi
 		fi
 
 		if [ -z "$IMG_LIST_URL" ] || [[ "$IMG_LIST_URL" =~ "null" ]]; then
-			echo "No matching source found"
+			echo "No matching source found, IMG_LIST_URL: ${IMG_LIST_URL}"
 			# set +x
 			# if curl --http1.1 -L -s --connect-timeout 15 -m 15 "${RELEASES_API_URL}" | grep "rate limit" >/dev/null; then
 			# 	echo "GitHub API rate limit exceeded"
