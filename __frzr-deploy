@@ -569,7 +569,7 @@ validate_checksum_format() {
 	fi
 	
 	# 检查是否包含明显的错误信息
-	if echo "$checksum_content" | grep -qi -E "(404|not found|error|<!DOCTYPE|<html|<head)" 2>/dev/null; then
+	if echo "$checksum_content" | grep -qi -E "(not found|error|<!DOCTYPE|<html|<head)" 2>/dev/null; then
 		echo "校验文件包含错误信息或HTML内容" >&2
 		return 1
 	fi
@@ -1042,8 +1042,9 @@ main() {
 			echo "VERSION_PATH: ${VERSION_PATH}, BRANCH: ${BRANCH}" >&2
 			
 			if [[ -n "$VERSION_PATH" && -n "$BRANCH" ]]; then
-				IMG_LIST_STR=$(try_checksum_mirrors "$VERSION_PATH" "$BRANCH")
-				if [[ $? -ne 0 ]]; then
+				local checksum_status=0
+				IMG_LIST_STR=$(try_checksum_mirrors "$VERSION_PATH" "$BRANCH") || checksum_status=$?
+				if [[ $checksum_status -ne 0 ]]; then
 					IMG_LIST_STR=""
 				fi
 			else
