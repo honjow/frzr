@@ -7,32 +7,89 @@ if [ $EUID -ne 0 ]; then
     exit 1
 fi
 
-microcode_flag=""
-if grep -q "microcode" "/etc/mkinitcpio.conf"; then
-    microcode_flag="# "
-fi
+log_info() {
+    echo "$*" >&2
+}
 
-function initramfs_subvol() {
-    local subvol=$1
-    if [ -z "$subvol" ]; then
-        echo "No subvol found" >&2
-        exit 1
+log_error() {
+    echo "ERROR: $*" >&2
+}
+
+# Check if microcode hook is enabled in mkinitcpio.conf
+detect_microcode_hook() {
+    if grep -q "microcode" "/etc/mkinitcpio.conf" 2>/dev/null; then
+        echo "# "
+    else
+        echo ""
     fi
+}
 
-    cd $subvol
-    # Mount necessary file systems
+# Parse deployment information from os-release
+parse_deployment_info() {
+    local os_release_file="$1"
+    
+    if [ ! -f "$os_release_file" ]; then
+        log_error "os-release file not found: $os_release_file"
+        return 1
+    fi
+    
+    local id=$(grep '^ID=' "$os_release_file" | awk -F= '{print $2}' | sed 's/"//g')
+    local version_id=$(grep '^VERSION_ID=' "$os_release_file" | awk -F= '{print $2}' | sed 's/"//g')
+    local build_id=$(grep '^BUILD_ID=' "$os_release_file" | awk -F= '{print $2}' | sed 's/"//g')
+    
+    # 如果 BUILDID 包含_ 则只取最后一个_之后的部分
+    if [[ $build_id == *"_"* ]]; then
+        build_id=$(echo "$build_id" | awk -F_ '{print $NF}')
+    fi
+    
+    local build_name="${id}-${version_id}_${build_id}"
+    echo "$id $version_id $build_id $build_name"
+}
+
+mount_chroot_filesystems() {
+    local subvol="$1"
+    cd "$subvol"
     mount -t proc /proc proc/
     mount -t sysfs /sys sys/
     mount --rbind /dev dev/
     mount --rbind /etc/mkinitcpio.d etc/mkinitcpio.d/
+}
 
-    # Set R/W permissions
-    btrfs property set -fts ${SUBVOL} ro false
+unmount_chroot_filesystems() {
+    local subvol="$1"
+    umount -l "${subvol}/proc" 2>/dev/null || true
+    umount -l "${subvol}/sys" 2>/dev/null || true
+    mount --make-rslave "${subvol}/dev" 2>/dev/null || true
+    umount -l "${subvol}/dev" 2>/dev/null || true
+    umount -l "${subvol}/etc/mkinitcpio.d" 2>/dev/null || true
+}
 
-    chroot ${SUBVOL} /bin/bash <<EOF
-# Commands to be ran in chroot
+set_subvol_readonly() {
+    local subvol="$1"
+    local readonly="$2"
+    btrfs property set -fts "$subvol" ro "$readonly"
+}
 
-### Create distro mkinitcpio preset
+get_subvol_readonly_state() {
+    local subvol="$1"
+    local state=$(btrfs property get -fts "$subvol" 2>/dev/null | grep "ro=" | cut -d'=' -f2)
+    echo "$state"
+}
+
+build_initramfs_in_subvol() {
+    local subvol="$1"
+    local microcode_flag="$2"
+    
+    if [ -z "$subvol" ]; then
+        log_error "No subvol specified"
+        return 1
+    fi
+
+    mount_chroot_filesystems "$subvol"
+    set_subvol_readonly "$subvol" false
+    
+    chroot ${subvol} /bin/bash <<EOF
+# Create distro mkinitcpio preset
 echo '
 ALL_config="/etc/mkinitcpio.conf"
 ALL_kver="/boot/vmlinuz-linux"
@@ -43,90 +100,91 @@ PRESETS="default"
 default_image="/boot/initramfs-linux.img"
 ' > /etc/mkinitcpio.d/\${NAME%%-*}.preset
 
-### Rebuild Initramfs with custom preset
+# Rebuild initramfs with custom preset
 mkinitcpio -p \${NAME%%-*}
 EOF
-    # Set back to R/O permissions
-    btrfs property set -fts ${SUBVOL} ro true
-    # unmount filesystems
-    umount -l ${SUBVOL}/proc
-    umount -l ${SUBVOL}/sys
-    mount --make-rslave ${SUBVOL}/dev
-    umount -l ${SUBVOL}/dev
-    umount -l ${SUBVOL}/etc/mkinitcpio.d
-
+    
+    set_subvol_readonly "$subvol" true
+    unmount_chroot_filesystems "$subvol"
 }
 
-function initramfs_boot() {
-    local path=$1
-    if [ -z "$ID" ]; then
-        echo "No ID found" >&2
-        exit 1
+build_initramfs_for_deployment() {
+    local boot_path="$1"
+    local deployment_id="$2"
+    local build_name="$3"
+    local microcode_flag="$4"
+    
+    if [ -z "$deployment_id" ] || [ -z "$build_name" ] || [ -z "$boot_path" ]; then
+        log_error "Missing required parameters for deployment build"
+        return 1
     fi
-    if [ -z "$BUILD" ]; then
-        echo "No BUILD found" >&2
-        exit 1
-    fi
-    if [ -z path ]; then
-        echo "No path found" >&2
-        exit 1
-    fi
-
-    cat > "/etc/mkinitcpio.d/${ID}.preset" <<EOF
+    
+    cat > "/etc/mkinitcpio.d/${deployment_id}.preset" <<EOF
 ALL_config="/etc/mkinitcpio.conf"
-ALL_kver="$path/$BUILD/vmlinuz-linux"
-${microcode_flag}ALL_microcode=($path/$BUILD/*-ucode.img)
+ALL_kver="$boot_path/$build_name/vmlinuz-linux"
+${microcode_flag}ALL_microcode=($boot_path/$build_name/*-ucode.img)
 
 PRESETS="default"
 
-default_image="$path/initramfs-linux.img"
+default_image="$boot_path/initramfs-linux.img"
 EOF
-    # If we are not doing a deployment then this will be used for local installs to rebuild initramfs
-    mkinitcpio -p $ID
+    
+    mkinitcpio -p "$deployment_id"
 }
 
-# Check if script is being ran frmo the install media
-if [ -d /tmp/frzr_root ]; then
-
-    if [ -d "${SUBVOL}" ]; then
-
-        initramfs_subvol "${SUBVOL}"
-    else
-        echo "No deployment directory found"
-        exit 1
+copy_boot_files_if_unlocked() {
+    local BUILD="$1"
+    
+    if [[ -d "/boot/$BUILD" ]]; then
+        cp "/boot/$BUILD"/* /boot/ 2>/dev/null || true
     fi
-else
-    echo "We don't appear to be running from an arch install media"
-fi
 
-# Build initramfs from within a deployed system
-if [ -d /frzr_root ]; then
+    if [[ -d "/efi/$BUILD" ]]; then
+        cp "/efi/$BUILD"/* /efi/ 2>/dev/null || true
+        cp "/efi/$BUILD"/* /boot/ 2>/dev/null || true
+    fi
 
+    if [[ -d "/frzr_root/boot/$BUILD" ]]; then
+        cp "/frzr_root/boot/$BUILD"/* "/frzr_root/boot/" 2>/dev/null || true
+        cp "/frzr_root/boot/$BUILD"/* /boot/ 2>/dev/null || true
+    fi
+}
+
+process_install_media() {
+    if [ -d "$SUBVOL" ]; then
+        local microcode_flag=$(detect_microcode_hook)
+        build_initramfs_in_subvol "$SUBVOL" "$microcode_flag"
+    else
+        log_error "No deployment directory found"
+        return 1
+    fi
+}
+
+process_deployed_system() {
+    local os_release_file
+    
     if [ -n "$SUBVOL" ]; then
-        ### Grabbing name of the new deployed system
-        ID=$(grep '^ID=' "$SUBVOL/etc/os-release" | awk -F= '{ print $2 }' | sed 's/"//g')
-        VERSIONID=$(grep '^VERSION_ID=' "$SUBVOL/etc/os-release" | awk -F= '{ print $2 }' | sed 's/"//g')
-        BUILDID=$(grep '^BUILD_ID=' "$SUBVOL/etc/os-release" | awk -F= '{ print $2 }' | sed 's/"//g')
+        os_release_file="$SUBVOL/etc/os-release"
     else
-        ### Grabbing name of the currently deployed system
-        ID=$(grep '^ID=' /etc/os-release | awk -F= '{ print $2 }' | sed 's/"//g')
-        VERSIONID=$(grep '^VERSION_ID=' /etc/os-release | awk -F= '{ print $2 }' | sed 's/"//g')
-        BUILDID=$(grep '^BUILD_ID=' /etc/os-release | awk -F= '{ print $2 }' | sed 's/"//g')
+        os_release_file="/etc/os-release"
     fi
-
-    # 如果 BUILDID 包含_ 则只取最后一个_之后的部分
-    if [[ $BUILDID == *"_"* ]]; then
-        BUILDID=$(echo $BUILDID | awk -F_ '{print $NF}')
+    
+    local deployment_info=$(parse_deployment_info "$os_release_file")
+    if [ -z "$deployment_info" ]; then
+        log_error "Failed to parse deployment information"
+        return 1
     fi
-
-    BUILD="$ID"-"$VERSIONID"_"$BUILDID"
+    
+    read -r ID VERSIONID BUILDID BUILD <<< "$deployment_info"
     DEPLOYMENT_PATH="/frzr_root/deployments/$BUILD"
-
+    
     if [[ ! -d $DEPLOYMENT_PATH ]]; then
-        echo "No deployment found for $BUILD"
-        exit 1
+        log_error "No deployment found for $BUILD"
+        return 1
     fi
 
+    echo "Generating configuration for $BUILD"
+    
     # Get locked state
     RELOCK=0
     LOCK_STATE=$(btrfs property get -fts "$DEPLOYMENT_PATH")
@@ -136,35 +194,32 @@ if [ -d /frzr_root ]; then
     else
         echo "Filesystem appears to be unlocked"
     fi
-
-    echo "Generating configuration for $BUILD"
-
-    ### Rebuild Initramfs with custom preset
-
+    
+    local microcode_flag=$(detect_microcode_hook)
+    
     if [ -n "$SUBVOL" ]; then
-        initramfs_subvol "${SUBVOL}"
-    elif [[ -d "/efi/${BUILD}" ]] && grep -q "HOOKS=.*systemd" /etc/mkinitcpio.conf; then
-        initramfs_boot "/efi"
+        build_initramfs_in_subvol "$SUBVOL" "$microcode_flag"
+    elif [[ -d "/efi/$BUILD" ]] && grep -q "HOOKS=.*systemd" "/etc/mkinitcpio.conf"; then
+        build_initramfs_for_deployment "/efi" "$ID" "$BUILD" "$microcode_flag"
     else
-        initramfs_boot "/frzr_root/boot"
+        build_initramfs_for_deployment "/frzr_root/boot" "$ID" "$BUILD" "$microcode_flag"
     fi
-
+    
     if [[ $RELOCK == 1 ]]; then
         btrfs property set -fts ${DEPLOYMENT_PATH} ro true
     else
         # Move rebuilt images to the unlocked location if system was unlocked prior
-        if [[ -d /boot/$BUILD ]]; then
-            cp /boot/$BUILD/* /boot
-        fi
-
-        if [[ -d /efi/$BUILD ]]; then
-            cp /efi/$BUILD/* /efi
-            cp /efi/$BUILD/* /boot
-        fi
-
-        if [[ -d /frzr_root/boot/$BUILD ]]; then
-            cp /frzr_root/boot/$BUILD/* /frzr_root/boot
-            cp /frzr_root/boot/$BUILD/* /boot
-        fi
+        copy_boot_files_if_unlocked "$BUILD"
     fi
+}
+
+# Check if script is being run from the install media
+if [ -d /tmp/frzr_root ]; then
+    process_install_media
+else
+    echo "We don't appear to be running from an arch install media"
+fi
+
+if [ -d /frzr_root ]; then
+    process_deployed_system
 fi
