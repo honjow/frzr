@@ -163,7 +163,12 @@ EOF
             log_info "UKI 构建失败，使用传统启动模式"
         fi
     else
-        # Traditional mode - set frzr.conf as default
+        # Traditional mode - clean up UKI files and set frzr.conf as default
+        local uki_file="/boot/EFI/Linux/${build_name%%-*}.efi"
+        if [ -f "$uki_file" ]; then
+            rm -f "$uki_file"
+            log_info "已清理 UKI 文件：$uki_file"
+        fi
         echo "default frzr.conf" > /boot/loader/loader.conf
         log_info "传统模式：已设置 frzr.conf 为默认启动项"
     fi
@@ -241,7 +246,12 @@ EOF
             log_info "UKI 构建失败，使用传统启动模式"
         fi
     else
-        # Traditional mode - set frzr.conf as default
+        # Traditional mode - clean up UKI files and set frzr.conf as default
+        local uki_file="$boot_path/EFI/Linux/$build_name.efi"
+        if [ -f "$uki_file" ]; then
+            rm -f "$uki_file"
+            log_info "已清理 UKI 文件：$uki_file"
+        fi
         echo "default frzr.conf" > /boot/loader/loader.conf
         log_info "传统模式：已设置 frzr.conf 为默认启动项"
     fi
