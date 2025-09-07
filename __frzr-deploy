@@ -447,13 +447,52 @@ get_boot_to_delete() {
 	ls -1 ${boot_path} | grep -E '(chimeraos|skorionos)-*_*' | grep -v ${current_version} | grep -v ${TO_BOOT} || echo
 }
 
+get_uki_to_delete() {
+	local current_version=${1}
+	local boot_cfg_path=${2}
+	local uki_path=${3}
+
+	local TO_BOOT=$(get_next_boot_deployment ${current_version} ${boot_cfg_path})
+	
+	# Also check loader.conf for UKI default boot entry
+	local loader_cfg="${uki_path}/../loader/loader.conf"
+	if [ -f "${loader_cfg}" ]; then
+		local loader_default=$(get_next_boot_deployment ${current_version} ${loader_cfg})
+		if [[ "${loader_default}" != "this-is-not-a-valid-version-string" ]]; then
+			TO_BOOT="${loader_default}"
+		fi
+	fi
+	
+	# Check if UKI directory exists
+	if [ ! -d "${uki_path}" ]; then
+		return
+	fi
+
+	# List UKI files and filter out current and next boot versions
+	ls -1 ${uki_path}/*.efi 2>/dev/null | while read -r uki_file; do
+		local basename_uki=$(basename "${uki_file}" .efi)
+		if [[ "${basename_uki}" != "${current_version}" ]] && [[ "${basename_uki}" != "${TO_BOOT}" ]]; then
+			echo "${uki_file}"
+		fi
+	done || echo
+}
+
 get_next_boot_deployment() {
 	local current_version=${1}
 	local boot_cfg_path=${2}
 
 	local TO_BOOT='this-is-not-a-valid-version-string'
-	if [ -f "${boot_cfg_path}" ] && grep "^title" "${boot_cfg_path}" >/dev/null; then
-		TO_BOOT=$(grep ^title ${boot_cfg_path} | sed 's/title //')
+	
+	if [ -f "${boot_cfg_path}" ]; then
+		if grep "^title" "${boot_cfg_path}" >/dev/null; then
+			# Traditional boot entry file (frzr.conf)
+			TO_BOOT=$(grep ^title ${boot_cfg_path} | sed 's/title //')
+		elif grep "^default" "${boot_cfg_path}" >/dev/null; then
+			# Boot loader config file (loader.conf)
+			local default_entry=$(grep ^default ${boot_cfg_path} | sed 's/default //')
+			# Remove .efi extension if present to get version name
+			TO_BOOT=$(echo "${default_entry}" | sed 's/\.efi$//')
+		fi
 	fi
 
 	echo ${TO_BOOT}
@@ -835,6 +874,7 @@ main() {
 		TO_DELETE=$(get_deployment_to_delete ${CURRENT} ${BOOT_CFG} ${DEPLOY_PATH})
 
 		TO_DELETE_BOOT=$(get_boot_to_delete ${CURRENT} ${BOOT_CFG} ${MOUNT_PATH}/boot)
+		TO_DELETE_UKI=$(get_uki_to_delete ${CURRENT} ${BOOT_CFG} ${MOUNT_PATH}/boot/EFI/Linux)
 
 		if [ -n "${TO_DELETE}" ]; then
 			for deployment in ${TO_DELETE}; do
@@ -849,6 +889,14 @@ main() {
 			for boot_entry in ${TO_DELETE_BOOT}; do
 				echo "deleting boot entry ${boot_entry}..."
 				rm -rf "${MOUNT_PATH}/boot/${boot_entry}" || true
+			done
+		fi
+
+		if [ -n "${TO_DELETE_UKI}" ]; then
+			# delete old UKI files
+			for uki_file in ${TO_DELETE_UKI}; do
+				echo "deleting UKI file ${uki_file}..."
+				rm -f "${uki_file}" || true
 			done
 		fi
 

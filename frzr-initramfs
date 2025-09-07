@@ -112,7 +112,7 @@ ${microcode_flag}ALL_microcode=(/boot/*-ucode.img)
 PRESETS="default"
 
 default_uki="/boot/EFI/Linux/${build_name%%-*}.efi"
-default_options="--cmdline='\''@/boot/uki-cmdline'\''"
+default_options="--cmdline=/boot/uki-cmdline"
 ' > /etc/mkinitcpio.d/${build_name%%-*}.preset
 else
     # Traditional mode preset
@@ -155,6 +155,10 @@ EOF
             echo "default frzr.conf" > /boot/loader/loader.conf
             log_info "UKI 构建失败，使用传统启动模式"
         fi
+    else
+        # Traditional mode - set frzr.conf as default
+        echo "default frzr.conf" > /boot/loader/loader.conf
+        log_info "传统模式：已设置 frzr.conf 为默认启动项"
     fi
 }
 
@@ -175,8 +179,12 @@ build_initramfs_for_deployment() {
         if [ ! -f "$uki_cmdline_file" ]; then
             log_info "uki-cmdline not found, generating using __frzr-deploy logic"
             # Source __frzr-deploy to get generate_kernel_cmdline function
-            source /usr/bin/__frzr-deploy
-            generate_kernel_cmdline "$build_name" > "$uki_cmdline_file"
+            if [ -f "/usr/bin/__frzr-deploy" ]; then
+                source /usr/bin/__frzr-deploy
+            else
+                source "$(dirname "$0")/__frzr-deploy"
+            fi
+            generate_kernel_cmdline "$build_name" "/frzr_root/deployments/$build_name" > "$uki_cmdline_file"
         fi
         
         # UKI mode preset
@@ -188,7 +196,7 @@ ${microcode_flag}ALL_microcode=($boot_path/$build_name/*-ucode.img)
 PRESETS="default"
 
 default_uki="$boot_path/EFI/Linux/$build_name.efi"
-default_options="--cmdline='@$boot_path/uki-cmdline'"
+default_options="--cmdline=$boot_path/uki-cmdline"
 EOF
     else
         # Traditional mode preset
@@ -225,6 +233,10 @@ EOF
             echo "default frzr.conf" > /boot/loader/loader.conf
             log_info "UKI 构建失败，使用传统启动模式"
         fi
+    else
+        # Traditional mode - set frzr.conf as default
+        echo "default frzr.conf" > /boot/loader/loader.conf
+        log_info "传统模式：已设置 frzr.conf 为默认启动项"
     fi
 }
 
