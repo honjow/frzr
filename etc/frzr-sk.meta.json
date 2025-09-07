@@ -20,6 +20,16 @@
         "label": "API CDN",
         "description": "同 Release CDN，默认关闭"
       }
+    },
+    "UKI": {
+      "enable": {
+        "label": "UKI 启用模式",
+        "description": "统一内核映像(UKI)启用模式。auto=自动检测系统支持情况，true=强制启用，false=禁用。UKI 可以提供更好的安全性和启动性能"
+      },
+      "keep_backup": {
+        "label": "保留传统备份",
+        "description": "在 UKI 模式下是否保留传统启动文件作为备份。true=保留备份文件和启动项，false=删除传统文件节省空间"
+      }
     }
   }
   

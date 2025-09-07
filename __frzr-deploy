@@ -370,8 +370,22 @@ get_boot_cfg() {
 	local additional_arguments=${4}
 	local swap_arguments=${5}
 	local fbcon=${6}
-
-	echo "title ${version}
+	
+	# Generate common boot configuration
+	local title="${version}"
+	local uki_file="${MOUNT_PATH}/boot/EFI/Linux/${version}.efi"
+	local keep_backup="true"
+	
+	if [ -f "/etc/frzr-sk.conf" ]; then
+		keep_backup=$(grep "^keep_backup" /etc/frzr-sk.conf | cut -d'=' -f2 | tr -d ' ')
+	fi
+	
+	# If UKI exists and backup is enabled, mark as backup
+	if [ -f "$uki_file" ] && [ "${keep_backup:-true}" = "true" ]; then
+		title="${version} (traditional backup)"
+	fi
+	
+	echo "title ${title}
 linux /${version}/vmlinuz-linux
 ${amd_ucode}
 ${intel_ucode}
@@ -1309,6 +1323,10 @@ main() {
 	BOOT_CFG_PARA=$(get_boot_cfg "${NAME}" "${AMD_UCODE}" "${INTEL_UCODE}" "${ADDITIONAL_ARGUMENTS}" "${SWAP_ARGUMENTS}" "${FBCON}")
 	echo "${BOOT_CFG_PARA}" >${BOOT_CFG}
 	export BOOT_CFG_PARA="${BOOT_CFG_PARA}"
+	
+	# Extract kernel command line from boot config for UKI
+	echo "${BOOT_CFG_PARA}" | grep "^options" | sed 's/^options //' > ${MOUNT_PATH}/boot/uki-cmdline
+	
 	echo "default frzr.conf" >${MOUNT_PATH}/boot/loader/loader.conf
 
 	# Check if there are migrations available

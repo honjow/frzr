@@ -79,18 +79,44 @@ get_subvol_readonly_state() {
 build_initramfs_in_subvol() {
     local subvol="$1"
     local microcode_flag="$2"
+    local build_name="$3"
     
     if [ -z "$subvol" ]; then
         log_error "No subvol specified"
         return 1
     fi
+    
+    if [ -z "$build_name" ]; then
+        # Extract build name from subvol path if not provided
+        build_name=$(basename "$subvol")
+    fi
 
     mount_chroot_filesystems "$subvol"
     set_subvol_readonly "$subvol" false
     
+    # Check UKI mode outside chroot
+    local use_uki=false
+    if should_use_uki; then
+        use_uki=true
+    fi
+    
     chroot ${subvol} /bin/bash <<EOF
 # Create distro mkinitcpio preset
-echo '
+if [ "$use_uki" = "true" ]; then
+    # UKI mode preset
+    echo '
+ALL_config="/etc/mkinitcpio.conf"
+ALL_kver="/boot/vmlinuz-linux"
+${microcode_flag}ALL_microcode=(/boot/*-ucode.img)
+
+PRESETS="default"
+
+default_uki="/boot/EFI/Linux/${build_name%%-*}.efi"
+default_options="--cmdline=@/boot/uki-cmdline"
+' > /etc/mkinitcpio.d/${build_name%%-*}.preset
+else
+    # Traditional mode preset
+    echo '
 ALL_config="/etc/mkinitcpio.conf"
 ALL_kver="/boot/vmlinuz-linux"
 ${microcode_flag}ALL_microcode=(/boot/*-ucode.img)
@@ -98,14 +124,38 @@ ${microcode_flag}ALL_microcode=(/boot/*-ucode.img)
 PRESETS="default"
 
 default_image="/boot/initramfs-linux.img"
-' > /etc/mkinitcpio.d/\${NAME%%-*}.preset
+' > /etc/mkinitcpio.d/${build_name%%-*}.preset
+fi
 
 # Rebuild initramfs with custom preset
-mkinitcpio -p \${NAME%%-*}
+mkinitcpio -p ${build_name%%-*}
 EOF
     
     set_subvol_readonly "$subvol" true
     unmount_chroot_filesystems "$subvol"
+    
+    # UKI post-processing (outside chroot, using correct paths)
+    if should_use_uki; then
+        local uki_file="/boot/EFI/Linux/${build_name%%-*}.efi"
+        if [ -f "$uki_file" ]; then
+            log_info "UKI 构建成功：$uki_file"
+            
+            # Handle backup files
+            if [ "$(get_uki_config "keep_backup" "true")" = "false" ]; then
+                rm -rf "/boot/${build_name%%-*}"
+                rm -f "/boot/loader/entries/frzr.conf"
+                log_info "已删除传统文件以节省空间"
+            fi
+            
+            # Set UKI as default boot entry
+            echo "default ${build_name%%-*}.efi" > /boot/loader/loader.conf
+            log_info "已设置 UKI 为默认启动项"
+        else
+            # UKI build failed, ensure traditional mode
+            echo "default frzr.conf" > /boot/loader/loader.conf
+            log_info "UKI 构建失败，使用传统启动模式"
+        fi
+    fi
 }
 
 build_initramfs_for_deployment() {
@@ -119,7 +169,21 @@ build_initramfs_for_deployment() {
         return 1
     fi
     
-    cat > "/etc/mkinitcpio.d/${deployment_id}.preset" <<EOF
+    if should_use_uki; then
+        # UKI mode preset
+        cat > "/etc/mkinitcpio.d/${deployment_id}.preset" <<EOF
+ALL_config="/etc/mkinitcpio.conf"
+ALL_kver="$boot_path/$build_name/vmlinuz-linux"
+${microcode_flag}ALL_microcode=($boot_path/$build_name/*-ucode.img)
+
+PRESETS="default"
+
+default_uki="$boot_path/EFI/Linux/$build_name.efi"
+default_options="--cmdline=@$boot_path/uki-cmdline"
+EOF
+    else
+        # Traditional mode preset
+        cat > "/etc/mkinitcpio.d/${deployment_id}.preset" <<EOF
 ALL_config="/etc/mkinitcpio.conf"
 ALL_kver="$boot_path/$build_name/vmlinuz-linux"
 ${microcode_flag}ALL_microcode=($boot_path/$build_name/*-ucode.img)
@@ -128,8 +192,31 @@ PRESETS="default"
 
 default_image="$boot_path/initramfs-linux.img"
 EOF
+    fi
     
     mkinitcpio -p "$deployment_id"
+    
+    # UKI post-processing for deployment builds
+    if should_use_uki; then
+        if [ -f "$boot_path/EFI/Linux/$build_name.efi" ]; then
+            log_info "UKI 构建成功：$boot_path/EFI/Linux/$build_name.efi"
+            
+            # Handle backup files
+            if [ "$(get_uki_config "keep_backup" "true")" = "false" ]; then
+                rm -rf "$boot_path/$build_name"
+                rm -f "/boot/loader/entries/frzr.conf"
+                log_info "已删除传统文件以节省空间"
+            fi
+            
+            # Set UKI as default boot entry
+            echo "default $build_name.efi" > /boot/loader/loader.conf
+            log_info "已设置 UKI 为默认启动项"
+        else
+            # UKI build failed, ensure traditional mode
+            echo "default frzr.conf" > /boot/loader/loader.conf
+            log_info "UKI 构建失败，使用传统启动模式"
+        fi
+    fi
 }
 
 copy_boot_files_if_unlocked() {
@@ -153,7 +240,8 @@ copy_boot_files_if_unlocked() {
 process_install_media() {
     if [ -d "$SUBVOL" ]; then
         local microcode_flag=$(detect_microcode_hook)
-        build_initramfs_in_subvol "$SUBVOL" "$microcode_flag"
+        local build_name=$(basename "$SUBVOL")
+        build_initramfs_in_subvol "$SUBVOL" "$microcode_flag" "$build_name"
     else
         log_error "No deployment directory found"
         return 1
@@ -198,7 +286,7 @@ process_deployed_system() {
     local microcode_flag=$(detect_microcode_hook)
     
     if [ -n "$SUBVOL" ]; then
-        build_initramfs_in_subvol "$SUBVOL" "$microcode_flag"
+        build_initramfs_in_subvol "$SUBVOL" "$microcode_flag" "$BUILD"
     elif [[ -d "/efi/$BUILD" ]] && grep -q "HOOKS=.*systemd" "/etc/mkinitcpio.conf"; then
         build_initramfs_for_deployment "/efi" "$ID" "$BUILD" "$microcode_flag"
     else
@@ -219,6 +307,44 @@ if [ -d /tmp/frzr_root ]; then
 else
     echo "We don't appear to be running from an arch install media"
 fi
+
+# UKI support functions
+detect_uki_support() {
+    command -v ukify >/dev/null 2>&1 && [ -d "/boot/loader" ]
+}
+
+get_uki_config() {
+    local config_file="/etc/frzr-sk.conf"
+    local key="$1"
+    local default="$2"
+    
+    if [ -f "$config_file" ]; then
+        grep "^${key}" "$config_file" | cut -d'=' -f2 | tr -d ' ' || echo "$default"
+    else
+        echo "$default"
+    fi
+}
+
+should_use_uki() {
+    local enable=$(get_uki_config "enable" "auto")
+    
+    case "$enable" in
+        "true")
+            if detect_uki_support; then
+                return 0
+            else
+                log_error "UKI 被强制启用但系统不支持"
+                return 1
+            fi
+            ;;
+        "false")
+            return 1
+            ;;
+        "auto"|*)
+            detect_uki_support
+            ;;
+    esac
+}
 
 if [ -d /frzr_root ]; then
     process_deployed_system
