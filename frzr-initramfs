@@ -376,22 +376,19 @@ get_uki_config() {
 
 should_use_uki() {
     local target_root=${1:-}
-    local enable=$(get_uki_config "enable" "auto")
+    local enable=$(get_uki_config "enable" "false")
     
     case "$enable" in
         "true")
             if detect_uki_support "$target_root"; then
                 return 0
             else
-                log_error "UKI 被强制启用但系统不支持"
+                log_error "UKI 被启用但系统不支持"
                 return 1
             fi
             ;;
-        "false")
+        *)
             return 1
-            ;;
-        "auto"|*)
-            detect_uki_support "$target_root"
             ;;
     esac
 }
