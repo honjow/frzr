@@ -363,13 +363,44 @@ get_fbcon() {
 	fi
 }
 
+generate_kernel_cmdline() {
+	local version=${1}
+	local subvol_path=${2:-}
+	
+	# Get additional arguments
+	local additional_arguments=""
+	if [ -n "$subvol_path" ] && [ -e "${subvol_path}/usr/lib/frzr.d/bootconfig.conf" ]; then
+		additional_arguments="$(cat ${subvol_path}/usr/lib/frzr.d/bootconfig.conf)"
+	elif [ -e "/usr/lib/frzr.d/bootconfig.conf" ]; then
+		additional_arguments="$(cat /usr/lib/frzr.d/bootconfig.conf)"
+	fi
+	
+	# Get swap arguments
+	local swap_arguments=""
+	local mount_path="/frzr_root"
+	if [ -f ${mount_path}/swap/swapfile ]; then
+		local resume="resume=PARTUUID=$(lsblk -no PARTUUID "$(mount | grep " ${mount_path} " | cut -d' ' -f1)" 2>/dev/null)"
+		local resume_offset="resume_offset=$(btrfs inspect-internal map-swapfile -r ${mount_path}/swap/swapfile 2>/dev/null)"
+		swap_arguments="${resume} ${resume_offset}"
+	fi
+	
+	# Get fbcon
+	local fbcon=""
+	if [[ -x $(command -v parse-edid) && -f "/etc/sk-chos/screen-rotate" ]]; then
+		source /etc/sk-chos/screen-rotate 2>/dev/null || true
+		if [[ -n "$FBCON_PARA" ]]; then
+			fbcon="fbcon=$FBCON_PARA"
+		fi
+	fi
+	
+	echo "root=LABEL=frzr_root rw rootflags=subvol=deployments/${version} quiet splash loglevel=3 rd.systemd.show_status=auto rd.udev.log_priority=3 ${additional_arguments} ${swap_arguments} ${fbcon}"
+}
+
+
 get_boot_cfg() {
 	local version=${1}
 	local amd_ucode=${2}
 	local intel_ucode=${3}
-	local additional_arguments=${4}
-	local swap_arguments=${5}
-	local fbcon=${6}
 	
 	# Generate common boot configuration
 	local title="${version}"
@@ -385,12 +416,14 @@ get_boot_cfg() {
 		title="${version} (traditional backup)"
 	fi
 	
+	local cmdline=$(generate_kernel_cmdline "${version}" "${SUBVOL}")
+	
 	echo "title ${title}
 linux /${version}/vmlinuz-linux
 ${amd_ucode}
 ${intel_ucode}
 initrd /${version}/initramfs-linux.img
-options root=LABEL=frzr_root rw rootflags=subvol=deployments/${version} quiet splash loglevel=3 rd.systemd.show_status=auto rd.udev.log_priority=3 ${additional_arguments} ${swap_arguments} ${fbcon}"
+options ${cmdline}"
 
 }
 
@@ -1297,35 +1330,13 @@ main() {
 		fi
 	fi
 
-	ADDITIONAL_ARGUMENTS=""
-	if [ -e ${SUBVOL}/usr/lib/frzr.d/bootconfig.conf ]; then
-		# ADDITIONAL_ARGUMENTS="$ADDITIONAL_ARGUMENTS $(cat ${SUBVOL}/usr/lib/frzr.d/bootconfig.conf)"
-		if [ -n "${ADDITIONAL_ARGUMENTS}" ]; then
-			ADDITIONAL_ARGUMENTS="${ADDITIONAL_ARGUMENTS} $(cat ${SUBVOL}/usr/lib/frzr.d/bootconfig.conf)"
-		else
-			ADDITIONAL_ARGUMENTS="$(cat ${SUBVOL}/usr/lib/frzr.d/bootconfig.conf)"
-		fi
-	fi
-
-	# create_swap "${MOUNT_PATH}" "${SUBVOL}"
-	SWAP_ARGUMENTS=""
-	if [ -f ${MOUNT_PATH}/swap/swapfile ]; then
-		resume="resume=PARTUUID=$(lsblk -no PARTUUID "$(mount | grep " ${MOUNT_PATH} " | cut -d' ' -f1)")"
-		resume_offset="resume_offset=$(btrfs inspect-internal map-swapfile -r ${MOUNT_PATH}/swap/swapfile)"
-		SWAP_ARGUMENTS="${resume} ${resume_offset}"
-	fi
-
-	# create_nix "${MOUNT_PATH}"
-
-	FBCON="$(get_fbcon)"
-
-	# get_boot_cfg "${NAME}" "${AMD_UCODE}" "${INTEL_UCODE}" "${ADDITIONAL_ARGUMENTS}" "${SWAP_ARGUMENTS} ${FBCON}" > ${BOOT_CFG}
-	BOOT_CFG_PARA=$(get_boot_cfg "${NAME}" "${AMD_UCODE}" "${INTEL_UCODE}" "${ADDITIONAL_ARGUMENTS}" "${SWAP_ARGUMENTS}" "${FBCON}")
+	# Generate boot configuration and UKI kernel command line
+	BOOT_CFG_PARA=$(get_boot_cfg "${NAME}" "${AMD_UCODE}" "${INTEL_UCODE}")
 	echo "${BOOT_CFG_PARA}" >${BOOT_CFG}
 	export BOOT_CFG_PARA="${BOOT_CFG_PARA}"
 	
-	# Extract kernel command line from boot config for UKI
-	echo "${BOOT_CFG_PARA}" | grep "^options" | sed 's/^options //' > ${MOUNT_PATH}/boot/uki-cmdline
+	# Generate UKI kernel command line
+	generate_kernel_cmdline "${NAME}" "${SUBVOL}" > ${MOUNT_PATH}/boot/uki-cmdline
 	
 	echo "default frzr.conf" >${MOUNT_PATH}/boot/loader/loader.conf
 

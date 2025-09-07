@@ -112,7 +112,7 @@ ${microcode_flag}ALL_microcode=(/boot/*-ucode.img)
 PRESETS="default"
 
 default_uki="/boot/EFI/Linux/${build_name%%-*}.efi"
-default_options="--cmdline=@/boot/uki-cmdline"
+default_options="--cmdline='\''@/boot/uki-cmdline'\''"
 ' > /etc/mkinitcpio.d/${build_name%%-*}.preset
 else
     # Traditional mode preset
@@ -170,6 +170,15 @@ build_initramfs_for_deployment() {
     fi
     
     if should_use_uki; then
+        # Generate uki-cmdline using same logic as __frzr-deploy
+        local uki_cmdline_file="$boot_path/uki-cmdline"
+        if [ ! -f "$uki_cmdline_file" ]; then
+            log_info "uki-cmdline not found, generating using __frzr-deploy logic"
+            # Source __frzr-deploy to get generate_kernel_cmdline function
+            source /usr/bin/__frzr-deploy
+            generate_kernel_cmdline "$build_name" > "$uki_cmdline_file"
+        fi
+        
         # UKI mode preset
         cat > "/etc/mkinitcpio.d/${deployment_id}.preset" <<EOF
 ALL_config="/etc/mkinitcpio.conf"
@@ -179,7 +188,7 @@ ${microcode_flag}ALL_microcode=($boot_path/$build_name/*-ucode.img)
 PRESETS="default"
 
 default_uki="$boot_path/EFI/Linux/$build_name.efi"
-default_options="--cmdline=@$boot_path/uki-cmdline"
+default_options="--cmdline='@$boot_path/uki-cmdline'"
 EOF
     else
         # Traditional mode preset
