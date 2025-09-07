@@ -53,6 +53,12 @@ mount_chroot_filesystems() {
     mount -t sysfs /sys sys/
     mount --rbind /dev dev/
     mount --rbind /etc/mkinitcpio.d etc/mkinitcpio.d/
+    
+    # Mount boot partition for UKI generation
+    # Use MOUNT_PATH if available, fallback to /frzr_root
+    local boot_source="${MOUNT_PATH:-/frzr_root}/boot"
+    mkdir -p boot/
+    mount --rbind "$boot_source" boot/
 }
 
 unmount_chroot_filesystems() {
@@ -62,6 +68,7 @@ unmount_chroot_filesystems() {
     mount --make-rslave "${subvol}/dev" 2>/dev/null || true
     umount -l "${subvol}/dev" 2>/dev/null || true
     umount -l "${subvol}/etc/mkinitcpio.d" 2>/dev/null || true
+    umount -l "${subvol}/boot" 2>/dev/null || true
 }
 
 set_subvol_readonly() {
@@ -96,7 +103,7 @@ build_initramfs_in_subvol() {
     
     # Check UKI mode outside chroot
     local use_uki=false
-    if should_use_uki; then
+    if should_use_uki "$subvol"; then
         use_uki=true
     fi
     
@@ -331,7 +338,28 @@ fi
 
 # UKI support functions
 detect_uki_support() {
-    command -v ukify >/dev/null 2>&1 && [ -d "/boot/loader" ]
+    local target_root=${1:-}
+    
+    # Check if ukify is available in target environment
+    local ukify_available=false
+    if [ -n "$target_root" ]; then
+        # Check in specific subvolume/chroot target
+        if [ -x "${target_root}/usr/bin/ukify" ]; then
+            ukify_available=true
+        fi
+    else
+        # Check in current environment
+        if command -v ukify >/dev/null 2>&1; then
+            ukify_available=true
+        fi
+    fi
+    
+    if [ "$ukify_available" = "false" ]; then
+        return 1
+    fi
+    
+    # Check for systemd-boot loader directory (always check system boot partition, not subvol)
+    [ -d "/frzr_root/boot/loader" ] || [ -d "/boot/loader" ]
 }
 
 get_uki_config() {
@@ -347,11 +375,12 @@ get_uki_config() {
 }
 
 should_use_uki() {
+    local target_root=${1:-}
     local enable=$(get_uki_config "enable" "auto")
     
     case "$enable" in
         "true")
-            if detect_uki_support; then
+            if detect_uki_support "$target_root"; then
                 return 0
             else
                 log_error "UKI 被强制启用但系统不支持"
@@ -362,7 +391,7 @@ should_use_uki() {
             return 1
             ;;
         "auto"|*)
-            detect_uki_support
+            detect_uki_support "$target_root"
             ;;
     esac
 }
