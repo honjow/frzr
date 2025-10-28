@@ -16,11 +16,27 @@ exec 3>&1
 #   - fresh: 全新安装 (格式化整个磁盘)
 #   - dual: 双系统安装 (保留现有系统)
 #   - 如不指定则显示选择菜单
+#
+# 非交互模式:
+# 设置环境变量 FRZR_NONINTERACTIVE=1 以禁用所有 whiptail 交互
+# 在非交互模式下，必须提供所有参数 (USERNAME, DISK, INSTALL_TYPE)
+# 示例: FRZR_NONINTERACTIVE=1 frzr-bootstrap gamer /dev/sda fresh
 
 if [ $EUID -ne 0 ]; then
 	echo "$(basename "$0") must be run as root"
 	exit 1
 fi
+
+# 检测非交互模式
+IS_NONINTERACTIVE=false
+echo "[DEBUG] FRZR_NONINTERACTIVE=${FRZR_NONINTERACTIVE:-0}" >&2
+if [ "${FRZR_NONINTERACTIVE:-0}" = "1" ]; then
+	IS_NONINTERACTIVE=true
+	echo "[NONINTERACTIVE MODE] All whiptail dialogs will be skipped"
+else
+	echo "[DEBUG] Running in INTERACTIVE mode" >&2
+fi
+echo "[DEBUG] IS_NONINTERACTIVE=$IS_NONINTERACTIVE" >&2
 
 # 全局变量
 MOUNT_PATH=/tmp/frzr_root
@@ -141,6 +157,14 @@ function check_existing_installation() {
 	elif [ "$has_efi" -gt 0 ] || [ "$has_root" -gt 0 ]; then
 		echo "检测到不完整的frzr安装残留 (EFI: $has_efi, Root: $has_root)"
 		
+		# 在非交互模式下，自动清理残留分区
+		if [ "$IS_NONINTERACTIVE" = true ]; then
+			echo "[NONINTERACTIVE] Auto-cleaning incomplete installation remnants"
+			cleanup_incomplete_installation
+			echo "残留分区已清理，当作新安装处理"
+			return 1
+		fi
+		
 		# 显示清理选项
 		if whiptail --yesno \
 			"检测到不完整的frzr安装残留：\n• frzr_efi 分区: $has_efi 个\n• frzr_root 分区: $has_root 个\n\n这可能是之前安装失败的结果。\n建议清理残留分区后重新安装。\n\n是否清理残留分区？" \
@@ -196,6 +220,23 @@ function cleanup_incomplete_installation() {
 }
 
 function choose_repair_or_reinstall() {
+	echo "[DEBUG] choose_repair_or_reinstall called with param: $1" >&2
+	echo "[DEBUG] IS_NONINTERACTIVE=$IS_NONINTERACTIVE" >&2
+	if [ "$IS_NONINTERACTIVE" = true ]; then
+		# In non-interactive mode, respect the install_type parameter
+		local install_type="$1"
+		echo "[DEBUG] install_type=$install_type" >&2
+		if [ "$install_type" = "repair" ]; then
+			echo "[NONINTERACTIVE] Existing installation detected, choosing: repair" >&2
+			echo "repair"
+		else
+			echo "[NONINTERACTIVE] Existing installation detected, choosing: reinstall with type=$install_type" >&2
+			echo "reinstall"
+		fi
+		return
+	fi
+	echo "[DEBUG] Showing whiptail dialog" >&2
+	
 	local choice=$(whiptail --menu "检测到现有的frzr安装，请选择操作:" 15 70 3 \
 		"repair" "修复安装 - 保留用户数据，修复引导和系统文件" \
 		"reinstall" "重新安装 - 进入安装选项，可选择全新安装或双系统安装" \
@@ -218,6 +259,11 @@ function choose_install_type() {
 	if [ -n "$1" ]; then
 		echo "$1"
 	else
+		if [ "$IS_NONINTERACTIVE" = true ]; then
+			echo "[NONINTERACTIVE] ERROR: INSTALL_TYPE parameter is required in non-interactive mode"
+			exit 1
+		fi
+		
 		# 检测现有系统
 		detect_existing_systems
 		show_system_info
@@ -263,10 +309,14 @@ function fresh_install() {
 
 	echo "=== 全新安装模式 ==="
 
-	if ! (whiptail --yesno "警告: $DISK 将被格式化。磁盘上的所有数据将丢失。您是否要继续?" 10 50 3>&1 1>&2 2>&3); then
-		whiptail --msgbox "安装已取消" 10 50 3>&1 1>&2 2>&3
-		echo "installation aborted"
-		exit 1
+	if [ "$IS_NONINTERACTIVE" = false ]; then
+		if ! (whiptail --yesno "警告: $DISK 将被格式化。磁盘上的所有数据将丢失。您是否要继续?" 10 50 3>&1 1>&2 2>&3); then
+			whiptail --msgbox "安装已取消" 10 50 3>&1 1>&2 2>&3
+			echo "installation aborted"
+			exit 1
+		fi
+	else
+		echo "[NONINTERACTIVE] Skipping confirmation dialog for fresh install on $DISK"
 	fi
 
 	USERNAME=${username:-gamer}
@@ -989,49 +1039,82 @@ function dual_boot_install() {
 	USERNAME=${username:-gamer}
 
 	echo "=== 双系统安装模式 ==="
-
+	
 	# 检测和显示现有系统
 	detect_existing_systems
 	show_system_info
 
 	# 检查空间
 	if ! check_unallocated_space; then
-		if ! whiptail --yesno \
-			"磁盘没有足够的未分配空间。\n\n是否要调整现有分区大小来安装？\n\n(选择'否'将退出并显示手动准备说明)" \
-			10 60 3>&1 1>&2 2>&3; then
+		# 没有足够的未分配空间
+		if [ "$IS_NONINTERACTIVE" = true ]; then
+			# 非交互模式：检查是否提供了分区操作参数
+			if [ -n "$FRZR_SHRINK_PARTITION" ] && [ -n "$FRZR_SHRINK_SIZE" ]; then
+				echo "[NONINTERACTIVE] Using partition shrink: $FRZR_SHRINK_PARTITION ($FRZR_SHRINK_SIZE GB)"
+				SELECTED_PARTITION="$FRZR_SHRINK_PARTITION"
+				SHRINK_SIZE_GB="$FRZR_SHRINK_SIZE"
+			elif [ -n "$FRZR_DELETE_PARTITION" ]; then
+				echo "[NONINTERACTIVE] Deleting partition: $FRZR_DELETE_PARTITION"
+				SELECTED_PARTITION="$FRZR_DELETE_PARTITION"
+				SHRINK_SIZE_GB="delete_entire_partition"
+			else
+				echo "[NONINTERACTIVE] ERROR: No free space and no partition operation specified"
+				echo "Please provide either:"
+				echo "  FRZR_SHRINK_PARTITION + FRZR_SHRINK_SIZE"
+				echo "  or FRZR_DELETE_PARTITION"
+				exit 1
+			fi
+			
+			# 执行分区操作
+			if ! shrink_selected_partition; then
+				echo "[NONINTERACTIVE] Partition operation failed"
+				exit 1
+			fi
+		else
+			# 交互模式：显示对话框
+			if ! whiptail --yesno \
+				"磁盘没有足够的未分配空间。\n\n是否要调整现有分区大小来安装？\n\n(选择'否'将退出并显示手动准备说明)" \
+				10 60 3>&1 1>&2 2>&3; then
 
-			# 简洁的手动说明
-			echo ""
-			echo "请手动准备至少55GiB未分配空间："
-			echo "Windows: 磁盘管理 -> 压缩卷"
-			echo "Linux: gparted 调整分区大小"
-			echo "准备完成后重新运行此脚本"
-			exit 1
+				# 简洁的手动说明
+				echo ""
+				echo "请手动准备至少55GiB未分配空间："
+				echo "Windows: 磁盘管理 -> 压缩卷"
+				echo "Linux: gparted 调整分区大小"
+				echo "准备完成后重新运行此脚本"
+				exit 1
 
-		fi
+			fi
 
-		# 执行分区缩小，每一步都检查返回值
-		if ! select_partition_to_shrink; then
-			echo "分区选择失败" >&2
-			exit 1
-		fi
+			# 执行分区缩小，每一步都检查返回值
+			if ! select_partition_to_shrink; then
+				echo "分区选择失败" >&2
+				exit 1
+			fi
 
-		if ! select_shrink_size; then
-			echo "大小选择失败" >&2
-			exit 1
-		fi
+			if ! select_shrink_size; then
+				echo "大小选择失败" >&2
+				exit 1
+			fi
 
-		if ! shrink_selected_partition; then
-			echo "分区操作失败" >&2
-			exit 1
+			if ! shrink_selected_partition; then
+				echo "分区操作失败" >&2
+				exit 1
+			fi
 		fi
 
 	else
-		if ! whiptail --yesno \
-			"检测到当前磁盘有足够的未分配空间。\n默认会使用当前磁盘的未分配空间来安装。\n\n是否继续？\n\n(选择'否'将退出安装)" \
-			10 60 3>&1 1>&2 2>&3; then
+		# 有足够的未分配空间
+		if [ "$IS_NONINTERACTIVE" = true ]; then
+			echo "[NONINTERACTIVE] Using available free space"
+		else
+			# 交互模式：显示确认
+			if ! whiptail --yesno \
+				"检测到当前磁盘有足够的未分配空间。\n默认会使用当前磁盘的未分配空间来安装。\n\n是否继续？\n\n(选择'否'将退出安装)" \
+				10 60 3>&1 1>&2 2>&3; then
 
-			exit 1
+				exit 1
+			fi
 		fi
 
 	fi
@@ -1086,6 +1169,25 @@ function main() {
 	local username="$1"
 	local disk="$2"
 	local install_type="$3"
+	
+	# 非交互模式参数验证
+	if [ "$IS_NONINTERACTIVE" = true ]; then
+		if [ -z "$disk" ]; then
+			echo "[NONINTERACTIVE] ERROR: DISK parameter is required in non-interactive mode"
+			echo "Usage: FRZR_NONINTERACTIVE=1 frzr-bootstrap USERNAME DISK INSTALL_TYPE"
+			exit 1
+		fi
+		if [ -z "$install_type" ]; then
+			echo "[NONINTERACTIVE] ERROR: INSTALL_TYPE parameter is required in non-interactive mode"
+			echo "Usage: FRZR_NONINTERACTIVE=1 frzr-bootstrap USERNAME DISK INSTALL_TYPE"
+			echo "INSTALL_TYPE: repair | fresh | dual"
+			exit 1
+		fi
+		if [ "$install_type" != "fresh" ] && [ "$install_type" != "repair" ] && [ "$install_type" != "dual" ]; then
+			echo "[NONINTERACTIVE] ERROR: INSTALL_TYPE must be one of: repair, fresh, dual"
+			exit 1
+		fi
+	fi
 
 	# 1. 选择磁盘
 	select_disk "$disk"
@@ -1093,7 +1195,7 @@ function main() {
 	# 2. 检查现有安装
 	if check_existing_installation; then
 		# 现有frzr安装 - 修复或重新安装
-		local choice=$(choose_repair_or_reinstall)
+		local choice=$(choose_repair_or_reinstall "$install_type")
 		case "$choice" in
 		"repair")
 			repair_install
@@ -1102,7 +1204,7 @@ function main() {
 			# 进入常规安装类型选择
 			handle_installation_choice "$username" "$install_type"
 			;;
-		"*")
+		*)
 			echo "取消安装" >&2
 			exit 1
 			;;
