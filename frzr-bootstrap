@@ -436,6 +436,15 @@ function select_free_space() {
 		return 0
 	else
 		# 多个选择，显示菜单
+		if [ "$IS_NONINTERACTIVE" = true ]; then
+			# 非交互模式：自动选择第一个（最大的）空闲空间
+			echo "[NONINTERACTIVE] Multiple free spaces found, auto-selecting first one"
+			local selected="${usable_spaces[0]}"
+			SELECTED_FREE_SPACE_START_SECTORS=$(echo "$selected" | cut -d'-' -f1)
+			SELECTED_FREE_SPACE_END_SECTORS=$(echo "$selected" | cut -d'-' -f2)
+			return 0
+		fi
+		
 		local selected=$(whiptail --menu "选择要使用的空闲空间:" 15 60 5 \
 			"${usable_spaces[@]}" 3>&1 1>&2 2>&3)
 
@@ -672,12 +681,16 @@ function shrink_selected_partition() {
 	fi
 
 	if [ "$SHRINK_SIZE_GB" = "delete_entire_partition" ]; then
-		# 最终确认
-		if ! whiptail --yesno \
-			"*** 最终确认 - 不可逆操作 ***\n\n分区: $partition ($size, $fstype)\n\n操作: 完全删除该分区\n\n该分区上的所有数据将永久丢失！\n\n您确定要执行吗？" \
-			15 60 3>&1 1>&2 2>&3; then
-			echo "用户取消危险操作"
-			return 1
+		# 最终确认（非交互模式跳过）
+		if [ "$IS_NONINTERACTIVE" = true ]; then
+			echo "[NONINTERACTIVE] Skipping delete partition confirmation for: $partition ($size, $fstype)"
+		else
+			if ! whiptail --yesno \
+				"*** 最终确认 - 不可逆操作 ***\n\n分区: $partition ($size, $fstype)\n\n操作: 完全删除该分区\n\n该分区上的所有数据将永久丢失！\n\n您确定要执行吗？" \
+				15 60 3>&1 1>&2 2>&3; then
+				echo "用户取消危险操作"
+				return 1
+			fi
 		fi
 
 		echo "删除整个分区: $partition ($size, $fstype)"
@@ -708,11 +721,16 @@ function shrink_selected_partition() {
 		# 缩小分区逻辑
 		local display_size="${SHRINK_SIZE_GB}GiB"
 
-		if ! whiptail --yesno \
-			"确认缩小分区?\n\n分区: $partition ($size, $fstype)\n释放空间: $display_size\n\n警告: 此操作有风险，请确保已备份重要数据!" \
-			12 60 3>&1 1>&2 2>&3; then
-			echo "用户取消缩小操作"
-			return 1
+		# 确认缩小分区（非交互模式跳过）
+		if [ "$IS_NONINTERACTIVE" = true ]; then
+			echo "[NONINTERACTIVE] Skipping shrink partition confirmation: $partition ($size, $fstype), releasing: $display_size"
+		else
+			if ! whiptail --yesno \
+				"确认缩小分区?\n\n分区: $partition ($size, $fstype)\n释放空间: $display_size\n\n警告: 此操作有风险，请确保已备份重要数据!" \
+				12 60 3>&1 1>&2 2>&3; then
+				echo "用户取消缩小操作"
+				return 1
+			fi
 		fi
 
 		# 获取当前分区大小
