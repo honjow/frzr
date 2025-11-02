@@ -547,15 +547,24 @@ get_fallback_url_justlist() {
 
 get_fallback_url_alist() {
 	local img_file_name=$1
+	local timeout=${2:-10}  # Default timeout 10 seconds, can be overridden
 
 	fallback_base="https://ns.switchsystem.eu.org/d/vfs/guest/stos/img/"
 	image_url="${fallback_base}${img_file_name}"
 
-	# 检查初始响应是否是重定向状态码（301、302、307、308）
-	initial_code=$(curl --http1.1 -s -o /dev/null -w "%{http_code}" -I "$image_url")
-	if [[ "$initial_code" =~ ^30[1278]$ ]]; then
-		echo "$image_url"
+	# Check initial response with timeout, handle curl failure gracefully under set -e
+	local initial_code
+	if initial_code=$(curl --http1.1 -s -o /dev/null -w "%{http_code}" -I \
+		--connect-timeout 5 \
+		--max-time "$timeout" \
+		--retry 0 \
+		"$image_url" 2>/dev/null); then
+		# Only check status code if curl succeeded
+		if [[ "$initial_code" =~ ^30[1278]$ ]]; then
+			echo "$image_url"
+		fi
 	fi
+	# If curl fails, function returns nothing (empty string)
 }
 
 # 验证校验文件内容格式是否符合SHA256规范
