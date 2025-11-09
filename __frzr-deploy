@@ -354,11 +354,22 @@ create_nix() {
 
 get_fbcon() {
 
-	if [[ -x $(command -v parse-edid) && -f "/etc/sk-chos/screen-rotate" ]]; then
-		source /etc/sk-chos/screen-rotate
-		if [[ -n "$FBCON_PARA" ]]; then
-			echo "fbcon=$FBCON_PARA"
-			return 0
+	if [[ -x $(command -v parse-edid) ]]; then
+		local rotate_path
+		if [[ -f "/etc/sk-chos/screen-rotate" ]]; then
+			rotate_path="/etc/sk-chos/screen-rotate"
+		elif [[ -f "/usr/libexec/screen-rotate" ]]; then
+			rotate_path="/usr/libexec/screen-rotate"
+		else
+			rotate_path=""
+		fi
+
+		if [[ -n "$rotate_path" ]]; then
+			source $rotate_path
+			if [[ -n "$FBCON_PARA" ]]; then
+				echo "fbcon=$FBCON_PARA"
+				return 0
+			fi
 		fi
 	fi
 }
