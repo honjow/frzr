@@ -294,7 +294,7 @@ function repair_install() {
 	mount "${INSTALL_MOUNT}" "${MOUNT_PATH}"
 	mount -t vfat "${BOOT_EFI}" "${MOUNT_PATH}/boot/"
 	rm -rf "${MOUNT_PATH:?}/boot/"*
-	bootctl --esp-path="${MOUNT_PATH}/boot/" install
+	bootctl --esp-path="${MOUNT_PATH}/boot/" --graceful install
 
 	echo "deleting subvolume..."
 	btrfs subvolume delete "${MOUNT_PATH}/deployments/"* || true
@@ -352,7 +352,7 @@ function fresh_install() {
 	mkfs.vfat "${PART1}"
 	dosfslabel "${PART1}" frzr_efi
 	mount -t vfat "${PART1}" "${MOUNT_PATH}/boot/"
-	bootctl --esp-path="${MOUNT_PATH}/boot/" install
+	bootctl --esp-path="${MOUNT_PATH}/boot/" --graceful install
 	parted "${DISK}" set 1 boot on
 
 	echo "全新安装完成"
@@ -1149,7 +1149,7 @@ function dual_boot_install() {
 	fi
 
 	# 安装bootloader
-	if ! bootctl --esp-path="${MOUNT_PATH}/boot/" install; then
+	if ! bootctl --esp-path="${MOUNT_PATH}/boot/" --graceful install; then
 		echo "bootloader安装失败" >&2
 		exit 1
 	fi
