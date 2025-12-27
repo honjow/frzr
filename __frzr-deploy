@@ -831,7 +831,7 @@ main() {
 	if [ -n "$FRZR_SOURCE" ] && [ "$FRZR_SOURCE" != " " ] &&
 		[ $FRZR_CHECK_UPDATE -eq 0 ] && [ $FRZR_STEAM_PROGRESS -eq 0 ] &&
 		[ -z "${local_install}" ]; then
-		if [[ ! "$FRZR_SOURCE" =~ \.img(\.tar\.xz|\.xz|\.zst)?$ ]]; then
+		if [[ ! "$FRZR_SOURCE" =~ \.img(\.tar\.xz|\.xz|\.zst)?|\.skosys$ ]]; then
 			echo "$FRZR_SOURCE" >"${MOUNT_PATH}/source"
 		else
 			base_name=$(basename "${FRZR_SOURCE}")
@@ -883,7 +883,7 @@ main() {
 		mount -o rw "$FRZR_DEV" /root/tmp_source
 
 		# find the matching file
-		if IMG_FILE=$(find /root/tmp_source -maxdepth 1 -type f -regex ".*\.img\(\.tar\.xz\|\.xz\|\.zst\)?$" | head -n1); then
+		if IMG_FILE=$(find /root/tmp_source -maxdepth 1 -type f -regex ".*\.img\(\.tar\.xz\|\.xz\|\.zst\)?|\.skosys$" | head -n1); then
 			FILE_NAME=$(basename "${IMG_FILE}")
 			NAME=$(echo "${FILE_NAME}" | cut -f 1 -d '.')
 			SUBVOL="${DEPLOY_PATH}/${NAME}"
@@ -892,7 +892,7 @@ main() {
 			exit 1
 		fi
 
-	elif [[ "$FRZR_SOURCE" =~ \.img(\.tar\.xz|\.xz|\.zst)?$ ]]; then
+	elif [[ "$FRZR_SOURCE" =~ \.img(\.tar\.xz|\.xz|\.zst)?|\.skosys$ ]]; then
 		echo "Using local image file: ${FRZR_SOURCE}" >&2
 		FILE_NAME=$(basename ${FRZR_SOURCE})
 		NAME=$(echo "${FILE_NAME}" | cut -f 1 -d '.')
@@ -1390,6 +1390,7 @@ main() {
 	fi
 
 	rm -f ${MOUNT_PATH}/*.img.*
+	rm -f ${MOUNT_PATH}/*.skosys
 
 	rm -rf /var/lib/pacman # undo frzr-unlock
 
