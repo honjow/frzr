@@ -3,6 +3,14 @@
 
 set -xe
 
+# 进程锁：防止多实例同时运行
+LOCK_FILE="/tmp/frzr-bootstrap.lock"
+exec 200>"$LOCK_FILE"
+if ! flock -n 200; then
+    echo "[ERROR] Another frzr-bootstrap instance is already running" >&2
+    exit 1
+fi
+
 # 初始化文件描述符3为stdout，供whiptail重定向使用
 exec 3>&1
 
