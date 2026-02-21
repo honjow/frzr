@@ -134,20 +134,15 @@ EOF
 
 copy_boot_files_if_unlocked() {
     local BUILD="$1"
-    
-    if [[ -d "/boot/$BUILD" ]]; then
-        cp "/boot/$BUILD"/* /boot/ 2>/dev/null || true
-    fi
+    local boot_dir file
 
-    if [[ -d "/efi/$BUILD" ]]; then
-        cp "/efi/$BUILD"/* /efi/ 2>/dev/null || true
-        cp "/efi/$BUILD"/* /boot/ 2>/dev/null || true
-    fi
-
-    if [[ -d "/frzr_root/boot/$BUILD" ]]; then
-        cp "/frzr_root/boot/$BUILD"/* "/frzr_root/boot/" 2>/dev/null || true
-        cp "/frzr_root/boot/$BUILD"/* /boot/ 2>/dev/null || true
-    fi
+    for boot_dir in /boot /efi /frzr_root/boot; do
+        if [[ -d "$boot_dir/$BUILD" ]]; then
+            for file in "$boot_dir/$BUILD"/*; do
+                cp "$boot_dir/$(basename "$file")" "$boot_dir/$BUILD/" 2>/dev/null || true
+            done
+        fi
+    done
 }
 
 process_install_media() {
