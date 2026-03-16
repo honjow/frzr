@@ -195,8 +195,15 @@ get_img_url() {
 handle_multipart_image() {
 	local base_file="$1"
 	local base_name=$(basename "$base_file")
-	local base_name_no_ext="${base_name%%.*}"
 	local dir_name=$(dirname "$base_file")
+
+	# Use extension-aware extraction to avoid truncating .from_xxx in .skdelta names
+	local base_name_no_ext
+	case "$base_name" in
+		*.skdelta) base_name_no_ext="${base_name%.skdelta}" ;;
+		*.skosys)  base_name_no_ext="${base_name%.skosys}" ;;
+		*)         base_name_no_ext="${base_name%%.*}" ;;
+	esac
 
 	# 首先检查新格式（.partN-T）
 	local first_part=$(find "$dir_name" -maxdepth 1 -type f -name "${base_name_no_ext}.part1-*.*" | head -n1)
@@ -735,6 +742,181 @@ get_frzr_release() {
 	fi
 }
 
+# ── Delta update support ──────────────────────────────────────────────
+
+try_delta_manifest_mirrors() {
+	local version_path="$1"
+	local branch="$2"
+
+	local mirrors=(
+		"https://gitee.com/honjow/sk-api-info/raw/master/skorionos/delta/"
+		"https://gitea.switchsystem.eu.org/honjow/sk-api-info/raw/branch/master/skorionos/delta/"
+		"https://raw.gitcode.com/honjow/sk-api-info/raw/master/skorionos/delta/"
+	)
+
+	for mirror in "${mirrors[@]}"; do
+		local manifest_url="${mirror}${version_path}/delta-manifest-${branch}.json"
+		local content
+		content=$(curl --http1.1 -L -s --connect-timeout 10 -m 10 "${manifest_url}" 2>/dev/null) || true
+		if [[ -n "$content" ]] && echo "$content" | jq -e '.deltas' >/dev/null 2>&1; then
+			echo "$content"
+			return 0
+		fi
+	done
+	return 1
+}
+
+try_get_delta_info() {
+	local base_url="$1"
+	local branch="$2"
+	local baseline_path="$3"
+	local version_path="$4"
+
+	command -v rsync >/dev/null 2>&1 || return 1
+	command -v jq >/dev/null 2>&1 || return 1
+	[ -d "$baseline_path" ] || return 1
+
+	local baseline_name
+	baseline_name=$(ls -1 "$baseline_path" 2>/dev/null | head -1)
+	[ -n "$baseline_name" ] || return 1
+	local baseline_version
+	baseline_version=$(get_version_from_name "$baseline_name")
+	[ -n "$baseline_version" ] || return 1
+
+	local manifest=""
+	manifest=$(try_delta_manifest_mirrors "$version_path" "$branch") || true
+
+	if [ -z "$manifest" ]; then
+		local manifest_url="${base_url}/delta-manifest-${branch}.json"
+		manifest=$(curl --http1.1 -L -s --connect-timeout 10 -m 10 "$manifest_url" 2>/dev/null) || true
+	fi
+
+	[ -n "$manifest" ] || return 1
+	echo "$manifest" | jq -e '.deltas' >/dev/null 2>&1 || return 1
+
+	local delta_info
+	delta_info=$(echo "$manifest" | jq -r \
+		--arg from "$baseline_version" \
+		'.deltas[] | select(.from_version == $from)' 2>/dev/null)
+	[ -n "$delta_info" ] || return 1
+
+	DELTA_FILENAME=$(echo "$delta_info" | jq -r '.filename')
+	DELTA_CHECKSUM=$(echo "$delta_info" | jq -r '.checksum' | sed 's/sha256://')
+	DELTA_SIZE=$(echo "$delta_info" | jq -r '.size')
+	DELTA_PARTS=$(echo "$delta_info" | jq -r '.parts // 1')
+	DELTA_PART_CHECKSUMS=$(echo "$delta_info" | jq -r '(.part_checksums // []) | .[] | sub("sha256:"; "")' 2>/dev/null) || true
+	DELTA_BASELINE_NAME="$baseline_name"
+
+	[ -n "$DELTA_FILENAME" ] && [ "$DELTA_FILENAME" != "null" ] || return 1
+	return 0
+}
+
+try_delta_download() {
+	local base_url="$1"
+	local mount_path="$2"
+	local delta_filename="$3"
+	local delta_checksum="$4"
+	local delta_parts="${5:-1}"
+	local delta_part_checksums="$6"
+
+	local delta_filename_no_ext="${delta_filename%.skdelta}"
+
+	if [ "$delta_parts" -gt 1 ]; then
+		local i cs_idx=0
+		local cs_array=()
+		if [ -n "$delta_part_checksums" ]; then
+			while IFS= read -r line; do
+				cs_array+=("$line")
+			done <<< "$delta_part_checksums"
+		fi
+
+		for i in $(seq 1 "$delta_parts"); do
+			local part_file="${delta_filename_no_ext}.part${i}-${delta_parts}.skdelta"
+			local part_url="${base_url}/${part_file}"
+			local part_path="${mount_path}/${part_file}"
+
+			echo "Downloading delta part ${i}/${delta_parts}: ${part_file}" >&2
+			if command -v aria2c >/dev/null 2>&1; then
+				aria2c --connect-timeout=15 --file-allocation=none -x 16 -s 16 \
+					--auto-file-renaming=false --allow-overwrite=true \
+					--console-log-level=warn -o "$part_file" -d "$mount_path" "$part_url" >&2 || return 1
+			else
+				curl --connect-timeout 15 --http1.1 -L -o "$part_path" -C - "$part_url" >&2 || return 1
+			fi
+
+			if [ ${#cs_array[@]} -gt 0 ] && [ -n "${cs_array[$cs_idx]:-}" ]; then
+				local actual_cs
+				actual_cs=$(sha256sum "$part_path" | awk '{print $1}')
+				if [ "$actual_cs" != "${cs_array[$cs_idx]}" ]; then
+					echo "Delta part $i checksum mismatch" >&2
+					return 1
+				fi
+			fi
+			cs_idx=$((cs_idx + 1))
+		done
+
+		local merged_file="${mount_path}/${delta_filename}"
+		merged_file=$(handle_multipart_image "$merged_file")
+		[ $? -eq 0 ] || return 1
+		echo "$merged_file"
+	else
+		local delta_url="${base_url}/${delta_filename}"
+		local delta_path="${mount_path}/${delta_filename}"
+
+		echo "Downloading delta: ${delta_filename}" >&2
+		if command -v aria2c >/dev/null 2>&1; then
+			aria2c --connect-timeout=15 --file-allocation=none -x 16 -s 16 \
+				--auto-file-renaming=false --allow-overwrite=true \
+				--console-log-level=warn -o "$delta_filename" -d "$mount_path" "$delta_url" >&2 || return 1
+		else
+			curl --connect-timeout 15 --http1.1 -L -o "$delta_path" -C - "$delta_url" >&2 || return 1
+		fi
+		echo "$delta_path"
+	fi
+
+	return 0
+}
+
+try_delta_deploy() {
+	local delta_file="$1"
+	local baseline_snap="$2"
+	local target_subvol="$3"
+
+	btrfs subvolume snapshot "${baseline_snap}" "${target_subvol}" || return 1
+
+	if ! (xz -dc "${delta_file}" | rsync --read-batch=- "${target_subvol}/"); then
+		btrfs subvolume delete "${target_subvol}" 2>/dev/null || true
+		return 1
+	fi
+
+	btrfs property set -ts "${target_subvol}" ro true || return 1
+	return 0
+}
+
+create_baseline() {
+	local mount_path="$1"
+	local subvol="$2"
+	local name="$3"
+	local baseline_path="${mount_path}/baselines"
+
+	mkdir -p "${baseline_path}"
+
+	if [ -d "${baseline_path}" ]; then
+		local old_bl
+		for old_bl in $(ls -1 "${baseline_path}" 2>/dev/null); do
+			if [ "${old_bl}" != "${name}" ]; then
+				btrfs subvolume delete "${baseline_path}/${old_bl}" 2>/dev/null || true
+			fi
+		done
+	fi
+
+	if [ ! -e "${baseline_path}/${name}" ]; then
+		btrfs subvolume snapshot -r "${subvol}" "${baseline_path}/${name}"
+	fi
+}
+
+# ── End delta update support ──────────────────────────────────────────
+
 main() {
 	if [ $EUID -ne 0 ]; then
 		echo "$(basename $0) must be run as root"
@@ -850,6 +1032,8 @@ main() {
 		echo "WARNING: source wasn't specified, using default source: ${DEFAULT_SOURCE}"
 		SOURCE="${DEFAULT_SOURCE}"
 	fi
+
+	DELTA_SUCCESS=false
 
 	if [ "${local_install}" == true ]; then
 		# install from local disk where label is "FRZR_UPDATE"
@@ -1115,6 +1299,7 @@ main() {
 		NAME=$(echo "${IMG_FILE_NAME}" | cut -f 1 -d '.')
 		SUBVOL="${DEPLOY_PATH}/${NAME}"
 		IMG_FILE="${MOUNT_PATH}/${IMG_FILE_NAME}"
+		DELTA_SUCCESS=false
 
 		SER=0
 		TOTAL=$(echo "$CHECKSUM_LIST" | wc -l)
@@ -1137,6 +1322,47 @@ main() {
 			done
 		fi
 
+		# ── Try delta update (silently falls back to full if anything fails) ──
+		if [ -e "${SUBVOL}" ]; then
+			echo "${NAME} already installed; aborting"
+			exit 7
+		fi
+
+		BASELINE_PATH="${MOUNT_PATH}/baselines"
+		VERSION_PATH_DELTA=$(basename "${BASE_URL}")
+
+		if try_get_delta_info "$BASE_URL" "$BRANCH" "$BASELINE_PATH" "$VERSION_PATH_DELTA" 2>/dev/null; then
+			echo "Delta update available: ${DELTA_FILENAME} ($(numfmt --to=iec ${DELTA_SIZE:-0} 2>/dev/null || echo "${DELTA_SIZE}") vs full)" >&2
+
+			DELTA_IMG_FILE=""
+			DELTA_IMG_FILE=$(try_delta_download "$BASE_URL" "$MOUNT_PATH" \
+				"$DELTA_FILENAME" "$DELTA_CHECKSUM" "$DELTA_PARTS" "$DELTA_PART_CHECKSUMS" 2>&1 | tail -1) || true
+
+			if [ -n "$DELTA_IMG_FILE" ] && [ -f "$DELTA_IMG_FILE" ]; then
+				local actual_cs
+				actual_cs=$(sha256sum "$DELTA_IMG_FILE" | awk '{print $1}')
+				if [ "$actual_cs" = "$DELTA_CHECKSUM" ]; then
+					echo "Delta checksum verified, applying..." >&2
+					if try_delta_deploy "$DELTA_IMG_FILE" \
+						"${BASELINE_PATH}/${DELTA_BASELINE_NAME}" "${SUBVOL}"; then
+						DELTA_SUCCESS=true
+						echo "Delta update applied successfully" >&2
+					else
+						echo "Delta deploy failed, falling back to full update" >&2
+					fi
+				else
+					echo "Delta checksum mismatch, falling back to full update" >&2
+				fi
+				rm -f "$DELTA_IMG_FILE"
+			else
+				echo "Delta download failed, falling back to full update" >&2
+			fi
+
+			rm -f "${MOUNT_PATH}"/*.skdelta 2>/dev/null || true
+		fi
+		# ── End delta attempt ──
+
+		if [ "$DELTA_SUCCESS" != "true" ]; then
 		for CHECKSUM in $CHECKSUM_LIST; do
 
 			FILE_NAME=$(echo "$IMG_LIST_STR" | grep $CHECKSUM | awk '{print $2}')
@@ -1246,19 +1472,22 @@ main() {
 
 			SER=$((SER + 1))
 		done
+		fi # end DELTA_SUCCESS check (full download path)
 	fi
 
-	if [ -z ${SHOW_UI} ]; then
-		echo "installing ${NAME}..."
-	else
-		whiptail --infobox "提取并安装系统镜像 (${NAME}), 这可能需要一些时间。" 10 50 3>&1 1>&2 2>&3
-	fi
+	if [ "$DELTA_SUCCESS" != "true" ]; then
+		if [ -z ${SHOW_UI} ]; then
+			echo "installing ${NAME}..."
+		else
+			whiptail --infobox "提取并安装系统镜像 (${NAME}), 这可能需要一些时间。" 10 50 3>&1 1>&2 2>&3
+		fi
 
-	# 处理分包镜像文件
-	IMG_FILE=$(handle_multipart_image "${IMG_FILE}")
-	if [ $? -ne 0 ]; then
-		echo "Error handling multipart image" >&2
-		exit 1
+		# 处理分包镜像文件
+		IMG_FILE=$(handle_multipart_image "${IMG_FILE}")
+		if [ $? -ne 0 ]; then
+			echo "Error handling multipart image" >&2
+			exit 1
+		fi
 	fi
 
 	# 先检查是否存在匹配项
@@ -1274,22 +1503,23 @@ main() {
 		done
 	fi
 
-	echo "deploying ${IMG_FILE} to ${DEPLOY_PATH}" >&2
+	if [ "$DELTA_SUCCESS" != "true" ]; then
+		echo "deploying ${IMG_FILE} to ${DEPLOY_PATH}" >&2
 
-	if [[ "${IMG_FILE##*.}" == "img" ]]; then
-		btrfs receive --quiet ${DEPLOY_PATH} <${IMG_FILE}
-	elif [[ "${IMG_FILE##*.}" == "zst" ]]; then
-		zstd -d -c ${IMG_FILE} | btrfs receive --quiet ${DEPLOY_PATH}
-	elif [[ "${IMG_FILE##*.}" == "xz" || "${IMG_FILE##*.}" == "skosys" ]]; then
-		if [[ "${IMG_FILE}" == *".tar.xz" ]]; then
-			tar xfO ${IMG_FILE} | btrfs receive --quiet ${DEPLOY_PATH}
+		if [[ "${IMG_FILE##*.}" == "img" ]]; then
+			btrfs receive --quiet ${DEPLOY_PATH} <${IMG_FILE}
+		elif [[ "${IMG_FILE##*.}" == "zst" ]]; then
+			zstd -d -c ${IMG_FILE} | btrfs receive --quiet ${DEPLOY_PATH}
+		elif [[ "${IMG_FILE##*.}" == "xz" || "${IMG_FILE##*.}" == "skosys" ]]; then
+			if [[ "${IMG_FILE}" == *".tar.xz" ]]; then
+				tar xfO ${IMG_FILE} | btrfs receive --quiet ${DEPLOY_PATH}
+			else
+				xz -dc ${IMG_FILE} | btrfs receive --quiet ${DEPLOY_PATH}
+			fi
 		else
-			xz -dc ${IMG_FILE} | btrfs receive --quiet ${DEPLOY_PATH}
+			echo "Unsupported file format: ${IMG_FILE}" >&2
+			exit 1
 		fi
-	else
-		# Handle other cases or provide an error message
-		echo "Unsupported file format: ${IMG_FILE}" >&2
-		exit 1
 	fi
 
 	mkdir -p ${MOUNT_PATH}/boot/${NAME}
@@ -1391,6 +1621,9 @@ main() {
 
 	rm -f ${MOUNT_PATH}/*.img.*
 	rm -f ${MOUNT_PATH}/*.skosys
+	rm -f ${MOUNT_PATH}/*.skdelta
+
+	create_baseline "${MOUNT_PATH}" "${SUBVOL}" "${NAME}" 2>/dev/null || true
 
 	rm -rf /var/lib/pacman # undo frzr-unlock
 
