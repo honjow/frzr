@@ -843,6 +843,7 @@ try_get_delta_info() {
 	DELTA_PARTS=$(echo "$delta_info" | jq -r '.parts // 1')
 	DELTA_PART_CHECKSUMS=$(echo "$delta_info" | jq -r '(.part_checksums // []) | .[] | sub("sha256:"; "")' 2>/dev/null) || true
 	DELTA_TARGET_META_HASH=$(echo "$delta_info" | jq -r '.target_meta_hash // ""')
+	DELTA_FORMAT=$(echo "$delta_info" | jq -r '.format // "tar"')
 	DELTA_BASELINE_NAME="$baseline_name"
 
 	[ -n "$DELTA_FILENAME" ] && [ "$DELTA_FILENAME" != "null" ] || return 1
@@ -941,51 +942,8 @@ verify_delta_metadata() {
 	return 0
 }
 
-try_delta_deploy() {
-	local delta_file="$1"
-	local baseline_snap="$2"
-	local target_subvol="$3"
-	local meta_hash="${4:-}"
-
-	btrfs subvolume snapshot "${baseline_snap}" "${target_subvol}" || return 1
-
-	# Extract delta tar directly to target subvolume to preserve xattrs/ACLs
-	# --overwrite-dir: update existing directory attributes (permissions/owner/ACLs)
-	if ! xz -dc "${delta_file}" | tar xf - --xattrs --acls --numeric-owner \
-		--overwrite-dir -C "${target_subvol}" 2>&1; then
-		echo "Delta extraction failed" >&2
-		btrfs subvolume delete "${target_subvol}" 2>/dev/null || true
-		return 1
-	fi
-
-	# Process deletions
-	if [ -f "${target_subvol}/.delta-deletions" ]; then
-		echo "Processing deletions..." >&2
-		while IFS= read -r del_path; do
-			[ -z "$del_path" ] && continue
-			rm -rf "${target_subvol:?}/${del_path}"
-		done < "${target_subvol}/.delta-deletions"
-		rm -f "${target_subvol}/.delta-deletions"
-	fi
-
-	# Apply attribute-only changes (permissions/owner/group)
-	# These files have unchanged content but different metadata
-	if [ -f "${target_subvol}/.delta-attrs" ]; then
-		echo "Applying attribute changes..." >&2
-		while IFS=$'\t' read -r attr_path attr_mode attr_uid attr_gid; do
-			[ -z "$attr_path" ] && continue
-			local full_path="${target_subvol}/${attr_path}"
-			if [ -e "$full_path" ] || [ -L "$full_path" ]; then
-				chmod "$attr_mode" "$full_path"
-				chown "${attr_uid}:${attr_gid}" "$full_path"
-			fi
-		done < "${target_subvol}/.delta-attrs"
-		rm -f "${target_subvol}/.delta-attrs"
-	fi
-
-	# Reconcile: remove files that exist on device baseline but not in target.
-	# Device baseline may contain runtime-generated files (e.g. fontconfig cache)
-	# that don't exist in CI baseline, so they won't appear in the deletion list.
+reconcile_delta_filelist() {
+	local target_subvol="$1"
 	if [ -f "${target_subvol}/.delta-filelist" ]; then
 		echo "Reconciling with target file list..." >&2
 		local filelist
@@ -1010,6 +968,82 @@ try_delta_deploy() {
 			echo "Removed $extra_count extra files from device baseline" >&2
 		fi
 	fi
+}
+
+try_delta_deploy() {
+	local delta_file="$1"
+	local baseline_snap="$2"
+	local target_subvol="$3"
+	local meta_hash="${4:-}"
+	local format="${5:-tar}"
+
+	btrfs subvolume snapshot "${baseline_snap}" "${target_subvol}" || return 1
+
+	if [ "$format" = "rsync-batch" ]; then
+		# === rsync-batch format ===
+		local work_dir
+		work_dir=$(mktemp -d)
+		if ! xz -dc "${delta_file}" | tar xf - -C "$work_dir" 2>&1; then
+			echo "Delta extraction failed" >&2
+			rm -rf "$work_dir"
+			btrfs subvolume delete "${target_subvol}" 2>/dev/null || true
+			return 1
+		fi
+
+		if [ ! -f "$work_dir/batch" ]; then
+			echo "rsync batch file not found in delta package" >&2
+			rm -rf "$work_dir"
+			btrfs subvolume delete "${target_subvol}" 2>/dev/null || true
+			return 1
+		fi
+
+		echo "Applying rsync batch..." >&2
+		if ! rsync -aAXH --no-inc-recursive --delete \
+			--read-batch="$work_dir/batch" "${target_subvol}/" 2>&1; then
+			echo "rsync read-batch failed" >&2
+			rm -rf "$work_dir"
+			btrfs subvolume delete "${target_subvol}" 2>/dev/null || true
+			return 1
+		fi
+
+		# Move filelist from work_dir to target for reconciliation
+		if [ -f "$work_dir/.delta-filelist" ]; then
+			cp "$work_dir/.delta-filelist" "${target_subvol}/.delta-filelist"
+		fi
+		rm -rf "$work_dir"
+	else
+		# === tar format ===
+		if ! xz -dc "${delta_file}" | tar xf - --xattrs --acls --numeric-owner \
+			--overwrite-dir -C "${target_subvol}" 2>&1; then
+			echo "Delta extraction failed" >&2
+			btrfs subvolume delete "${target_subvol}" 2>/dev/null || true
+			return 1
+		fi
+
+		if [ -f "${target_subvol}/.delta-deletions" ]; then
+			echo "Processing deletions..." >&2
+			while IFS= read -r del_path; do
+				[ -z "$del_path" ] && continue
+				rm -rf "${target_subvol:?}/${del_path}"
+			done < "${target_subvol}/.delta-deletions"
+			rm -f "${target_subvol}/.delta-deletions"
+		fi
+
+		if [ -f "${target_subvol}/.delta-attrs" ]; then
+			echo "Applying attribute changes..." >&2
+			while IFS=$'\t' read -r attr_path attr_mode attr_uid attr_gid; do
+				[ -z "$attr_path" ] && continue
+				local full_path="${target_subvol}/${attr_path}"
+				if [ -e "$full_path" ] || [ -L "$full_path" ]; then
+					chmod "$attr_mode" "$full_path"
+					chown "${attr_uid}:${attr_gid}" "$full_path"
+				fi
+			done < "${target_subvol}/.delta-attrs"
+			rm -f "${target_subvol}/.delta-attrs"
+		fi
+	fi
+
+	reconcile_delta_filelist "${target_subvol}"
 
 	if ! verify_delta_metadata "${target_subvol}" "${meta_hash}"; then
 		btrfs subvolume delete "${target_subvol}" 2>/dev/null || true
@@ -1491,6 +1525,7 @@ main() {
 				echo "  File: ${DELTA_FILENAME}" >&2
 				echo "  Size: ${delta_size_hr}" >&2
 				echo "  From: ${DELTA_BASELINE_NAME} -> ${NAME}" >&2
+				echo "  Format: ${DELTA_FORMAT:-tar}" >&2
 				echo "  Parts: ${DELTA_PARTS:-1}" >&2
 				if [ -n "${DELTA_MANIFEST_SOURCE:-}" ]; then
 					echo "  Manifest source: ${DELTA_MANIFEST_SOURCE}" >&2
@@ -1514,10 +1549,10 @@ main() {
 				local actual_cs
 				actual_cs=$(sha256sum "$DELTA_IMG_FILE" | awk '{print $1}')
 				if [ "$actual_cs" = "$DELTA_CHECKSUM" ]; then
-					echo "Delta checksum verified, applying..." >&2
+					echo "Delta checksum verified, applying (format: ${DELTA_FORMAT:-tar})..." >&2
 					if try_delta_deploy "$DELTA_IMG_FILE" \
 						"${BASELINE_PATH}/${DELTA_BASELINE_NAME}" "${SUBVOL}" \
-						"${DELTA_TARGET_META_HASH:-}"; then
+						"${DELTA_TARGET_META_HASH:-}" "${DELTA_FORMAT:-tar}"; then
 						DELTA_SUCCESS=true
 						echo "Delta update applied successfully" >&2
 					else
