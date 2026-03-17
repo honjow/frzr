@@ -775,8 +775,8 @@ try_get_delta_info() {
 	local baseline_path="$3"
 	local version_path="$4"
 
-	if ! command -v rsync >/dev/null 2>&1; then
-		DELTA_SKIP_REASON="rsync not installed"
+	if ! command -v tar >/dev/null 2>&1; then
+		DELTA_SKIP_REASON="tar not installed"
 		return 1
 	fi
 	if ! command -v jq >/dev/null 2>&1; then
@@ -947,19 +947,24 @@ try_delta_deploy() {
 
 	btrfs subvolume snapshot "${baseline_snap}" "${target_subvol}" || return 1
 
-	local batch_tmp="${delta_file%.xz}.batch"
-	if ! xz -dc "${delta_file}" > "${batch_tmp}"; then
-		rm -f "${batch_tmp}"
+	# Extract delta tar directly to target subvolume to preserve xattrs/ACLs
+	# --overwrite-dir: update existing directory attributes (permissions/owner/ACLs)
+	if ! xz -dc "${delta_file}" | tar xf - --xattrs --acls --numeric-owner \
+		--overwrite-dir -C "${target_subvol}" 2>&1; then
+		echo "Delta extraction failed" >&2
 		btrfs subvolume delete "${target_subvol}" 2>/dev/null || true
 		return 1
 	fi
 
-	if ! rsync --read-batch="${batch_tmp}" "${target_subvol}/"; then
-		rm -f "${batch_tmp}"
-		btrfs subvolume delete "${target_subvol}" 2>/dev/null || true
-		return 1
+	# Process deletions
+	if [ -f "${target_subvol}/.delta-deletions" ]; then
+		echo "Processing deletions..." >&2
+		while IFS= read -r del_path; do
+			[ -z "$del_path" ] && continue
+			rm -rf "${target_subvol:?}/${del_path}"
+		done < "${target_subvol}/.delta-deletions"
+		rm -f "${target_subvol}/.delta-deletions"
 	fi
-	rm -f "${batch_tmp}"
 
 	if ! verify_delta_metadata "${target_subvol}" "${meta_hash}"; then
 		btrfs subvolume delete "${target_subvol}" 2>/dev/null || true
