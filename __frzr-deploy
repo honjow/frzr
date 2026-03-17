@@ -1720,6 +1720,10 @@ main() {
 		fi
 	fi
 
+	# Create baseline before any migration scripts modify the subvolume,
+	# so it stays consistent with the pure btrfs-receive result used by CI delta generation.
+	create_baseline "${MOUNT_PATH}" "${SUBVOL}" "${NAME}" 2>/dev/null || true
+
 	mkdir -p ${MOUNT_PATH}/boot/${NAME}
 	cp ${SUBVOL}/boot/vmlinuz-linux ${MOUNT_PATH}/boot/${NAME}
 	cp ${SUBVOL}/boot/initramfs-linux.img ${MOUNT_PATH}/boot/${NAME}
@@ -1820,8 +1824,6 @@ main() {
 	rm -f ${MOUNT_PATH}/*.img.*
 	rm -f ${MOUNT_PATH}/*.skosys
 	rm -f ${MOUNT_PATH}/*.skdelta
-
-	create_baseline "${MOUNT_PATH}" "${SUBVOL}" "${NAME}" 2>/dev/null || true
 
 	rm -rf /var/lib/pacman # undo frzr-unlock
 
