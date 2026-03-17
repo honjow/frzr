@@ -1001,7 +1001,7 @@ try_delta_deploy() {
 		fi
 
 		echo "Applying rsync batch..." >&2
-		if ! rsync -aAXH --no-inc-recursive --delete \
+		if ! rsync -aAXH --numeric-ids --no-inc-recursive --delete \
 			--read-batch="$work_dir/batch" "${target_subvol}/" 2>&1; then
 			echo "rsync read-batch failed" >&2
 			rm -rf "$work_dir"
