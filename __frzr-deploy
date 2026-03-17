@@ -775,16 +775,31 @@ try_get_delta_info() {
 	local baseline_path="$3"
 	local version_path="$4"
 
-	command -v rsync >/dev/null 2>&1 || return 1
-	command -v jq >/dev/null 2>&1 || return 1
-	[ -d "$baseline_path" ] || return 1
+	if ! command -v rsync >/dev/null 2>&1; then
+		DELTA_SKIP_REASON="rsync not installed"
+		return 1
+	fi
+	if ! command -v jq >/dev/null 2>&1; then
+		DELTA_SKIP_REASON="jq not installed"
+		return 1
+	fi
+	if [ ! -d "$baseline_path" ]; then
+		DELTA_SKIP_REASON="no baseline directory (first deploy with delta support)"
+		return 1
+	fi
 
 	local baseline_name
 	baseline_name=$(ls -1 "$baseline_path" 2>/dev/null | head -1)
-	[ -n "$baseline_name" ] || return 1
+	if [ -z "$baseline_name" ]; then
+		DELTA_SKIP_REASON="no baseline snapshot found"
+		return 1
+	fi
 	local baseline_version
 	baseline_version=$(get_version_from_name "$baseline_name")
-	[ -n "$baseline_version" ] || return 1
+	if [ -z "$baseline_version" ]; then
+		DELTA_SKIP_REASON="cannot parse baseline version from: $baseline_name"
+		return 1
+	fi
 
 	DELTA_MANIFEST_SOURCE=""
 	local manifest=""
@@ -800,14 +815,23 @@ try_get_delta_info() {
 		fi
 	fi
 
-	[ -n "$manifest" ] || return 1
-	echo "$manifest" | jq -e '.deltas' >/dev/null 2>&1 || return 1
+	if [ -z "$manifest" ]; then
+		DELTA_SKIP_REASON="delta manifest not found for ${branch}"
+		return 1
+	fi
+	if ! echo "$manifest" | jq -e '.deltas' >/dev/null 2>&1; then
+		DELTA_SKIP_REASON="invalid delta manifest format"
+		return 1
+	fi
 
 	local delta_info
 	delta_info=$(echo "$manifest" | jq -r \
 		--arg from "$baseline_version" \
 		'.deltas[] | select(.from_version == $from)' 2>/dev/null)
-	[ -n "$delta_info" ] || return 1
+	if [ -z "$delta_info" ]; then
+		DELTA_SKIP_REASON="no delta from baseline ${baseline_version} in manifest"
+		return 1
+	fi
 
 	DELTA_FILENAME=$(echo "$delta_info" | jq -r '.filename')
 	DELTA_CHECKSUM=$(echo "$delta_info" | jq -r '.checksum' | sed 's/sha256://')
@@ -1323,6 +1347,7 @@ main() {
 		BASELINE_PATH="${MOUNT_PATH}/baselines"
 		VERSION_PATH_DELTA=$(basename "${BASE_URL}")
 		DELTA_AVAILABLE=false
+		DELTA_SKIP_REASON=""
 
 		if try_get_delta_info "$BASE_URL" "$BRANCH" "$BASELINE_PATH" "$VERSION_PATH_DELTA" 2>&1 >&2; then
 			DELTA_AVAILABLE=true
@@ -1358,7 +1383,7 @@ main() {
 					echo "  Manifest source: ${DELTA_MANIFEST_SOURCE}" >&2
 				fi
 			else
-				echo "No delta update available (full download required)" >&2
+				echo "No delta update available: ${DELTA_SKIP_REASON:-unknown reason}" >&2
 			fi
 			echo "${NAME}　${fallback_msg}"
 			exit 0 # let Steam know there is an update available
