@@ -840,6 +840,7 @@ try_get_delta_info() {
 	DELTA_SIZE=$(echo "$delta_info" | jq -r '.size')
 	DELTA_PARTS=$(echo "$delta_info" | jq -r '.parts // 1')
 	DELTA_PART_CHECKSUMS=$(echo "$delta_info" | jq -r '(.part_checksums // []) | .[] | sub("sha256:"; "")' 2>/dev/null) || true
+	DELTA_TARGET_META_HASH=$(echo "$delta_info" | jq -r '.target_meta_hash // ""')
 	DELTA_BASELINE_NAME="$baseline_name"
 
 	[ -n "$DELTA_FILENAME" ] && [ "$DELTA_FILENAME" != "null" ] || return 1
@@ -912,10 +913,37 @@ try_delta_download() {
 	return 0
 }
 
+verify_delta_metadata() {
+	local subvol="$1"
+	local expected_hash="$2"
+
+	if [ -z "$expected_hash" ]; then
+		echo "No metadata hash in manifest, skipping verification" >&2
+		return 0
+	fi
+
+	echo "Verifying deployment metadata..." >&2
+	local actual_hash
+	actual_hash=$(cd "$subvol" && find . -not -path './proc/*' -not -path './sys/*' -not -path './dev/*' -not -path './tmp/*' -not -path './run/*' \
+		-not -type s \
+		-printf '%P\t%s\t%m\t%U\t%G\t%y\n' 2>/dev/null | LC_ALL=C sort | sha256sum | awk '{print $1}')
+
+	if [ "$actual_hash" != "$expected_hash" ]; then
+		echo "Metadata verification failed!" >&2
+		echo "  expected: $expected_hash" >&2
+		echo "  actual:   $actual_hash" >&2
+		return 1
+	fi
+
+	echo "Metadata verification passed" >&2
+	return 0
+}
+
 try_delta_deploy() {
 	local delta_file="$1"
 	local baseline_snap="$2"
 	local target_subvol="$3"
+	local meta_hash="${4:-}"
 
 	btrfs subvolume snapshot "${baseline_snap}" "${target_subvol}" || return 1
 
@@ -932,6 +960,11 @@ try_delta_deploy() {
 		return 1
 	fi
 	rm -f "${batch_tmp}"
+
+	if ! verify_delta_metadata "${target_subvol}" "${meta_hash}"; then
+		btrfs subvolume delete "${target_subvol}" 2>/dev/null || true
+		return 1
+	fi
 
 	btrfs property set -ts "${target_subvol}" ro true || return 1
 	return 0
@@ -1431,7 +1464,8 @@ main() {
 				if [ "$actual_cs" = "$DELTA_CHECKSUM" ]; then
 					echo "Delta checksum verified, applying..." >&2
 					if try_delta_deploy "$DELTA_IMG_FILE" \
-						"${BASELINE_PATH}/${DELTA_BASELINE_NAME}" "${SUBVOL}"; then
+						"${BASELINE_PATH}/${DELTA_BASELINE_NAME}" "${SUBVOL}" \
+						"${DELTA_TARGET_META_HASH:-}"; then
 						DELTA_SUCCESS=true
 						echo "Delta update applied successfully" >&2
 					else
@@ -1570,6 +1604,9 @@ main() {
 		current_deploys_array=($(btrfs subvolume list ${MOUNT_PATH} | grep -E "deployments/(chimeraos|skorionos)" | awk '{print $9}'))
 		for current_deploy in "${current_deploys_array[@]}"; do
 			if [ "${current_deploy}" == "deployments/${CURRENT_RELEASE}" ]; then
+				continue
+			fi
+			if [ "${current_deploy}" == "deployments/${NAME}" ]; then
 				continue
 			fi
 			echo "current_deploy: ${current_deploy}, remove it..." >&2
