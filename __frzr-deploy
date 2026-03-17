@@ -966,6 +966,21 @@ try_delta_deploy() {
 		rm -f "${target_subvol}/.delta-deletions"
 	fi
 
+	# Apply attribute-only changes (permissions/owner/group)
+	# These files have unchanged content but different metadata
+	if [ -f "${target_subvol}/.delta-attrs" ]; then
+		echo "Applying attribute changes..." >&2
+		while IFS=$'\t' read -r attr_path attr_mode attr_uid attr_gid; do
+			[ -z "$attr_path" ] && continue
+			local full_path="${target_subvol}/${attr_path}"
+			if [ -e "$full_path" ] || [ -L "$full_path" ]; then
+				chmod "$attr_mode" "$full_path"
+				chown "${attr_uid}:${attr_gid}" "$full_path"
+			fi
+		done < "${target_subvol}/.delta-attrs"
+		rm -f "${target_subvol}/.delta-attrs"
+	fi
+
 	if ! verify_delta_metadata "${target_subvol}" "${meta_hash}"; then
 		btrfs subvolume delete "${target_subvol}" 2>/dev/null || true
 		return 1
