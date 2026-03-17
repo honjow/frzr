@@ -809,9 +809,11 @@ try_get_delta_info() {
 		local manifest_url="${base_url}/delta-manifest-${branch}.json"
 		echo "尝试从 GitHub 获取 delta manifest: ${manifest_url}" >&2
 		manifest=$(curl --http1.1 -L -s --connect-timeout 10 -m 10 "$manifest_url" 2>/dev/null) || true
-		if [ -n "$manifest" ]; then
+		if [[ -n "$manifest" ]] && echo "$manifest" | jq -e '.deltas' >/dev/null 2>&1; then
 			DELTA_MANIFEST_SOURCE="github:${base_url}"
 			echo "GitHub delta manifest 获取成功" >&2
+		else
+			manifest=""
 		fi
 	fi
 
