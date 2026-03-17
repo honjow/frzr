@@ -919,10 +919,19 @@ try_delta_deploy() {
 
 	btrfs subvolume snapshot "${baseline_snap}" "${target_subvol}" || return 1
 
-	if ! (xz -dc "${delta_file}" | rsync --read-batch=- "${target_subvol}/"); then
+	local batch_tmp="${delta_file%.xz}.batch"
+	if ! xz -dc "${delta_file}" > "${batch_tmp}"; then
+		rm -f "${batch_tmp}"
 		btrfs subvolume delete "${target_subvol}" 2>/dev/null || true
 		return 1
 	fi
+
+	if ! rsync --read-batch="${batch_tmp}" "${target_subvol}/"; then
+		rm -f "${batch_tmp}"
+		btrfs subvolume delete "${target_subvol}" 2>/dev/null || true
+		return 1
+	fi
+	rm -f "${batch_tmp}"
 
 	btrfs property set -ts "${target_subvol}" ro true || return 1
 	return 0
