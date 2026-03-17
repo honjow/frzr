@@ -758,7 +758,10 @@ try_delta_manifest_mirrors() {
 		local manifest_url="${mirror}${version_path}/delta-manifest-${branch}.json"
 		local content
 		content=$(curl --http1.1 -L -s --connect-timeout 10 -m 10 "${manifest_url}" 2>/dev/null) || true
+		echo "尝试 delta manifest 镜像站: ${manifest_url}" >&2
 		if [[ -n "$content" ]] && echo "$content" | jq -e '.deltas' >/dev/null 2>&1; then
+			DELTA_MANIFEST_SOURCE="mirror:${mirror}"
+			echo "Delta manifest 镜像站获取成功" >&2
 			echo "$content"
 			return 0
 		fi
@@ -783,12 +786,18 @@ try_get_delta_info() {
 	baseline_version=$(get_version_from_name "$baseline_name")
 	[ -n "$baseline_version" ] || return 1
 
+	DELTA_MANIFEST_SOURCE=""
 	local manifest=""
 	manifest=$(try_delta_manifest_mirrors "$version_path" "$branch") || true
 
 	if [ -z "$manifest" ]; then
 		local manifest_url="${base_url}/delta-manifest-${branch}.json"
+		echo "尝试从 GitHub 获取 delta manifest: ${manifest_url}" >&2
 		manifest=$(curl --http1.1 -L -s --connect-timeout 10 -m 10 "$manifest_url" 2>/dev/null) || true
+		if [ -n "$manifest" ]; then
+			DELTA_MANIFEST_SOURCE="github:${base_url}"
+			echo "GitHub delta manifest 获取成功" >&2
+		fi
 	fi
 
 	[ -n "$manifest" ] || return 1
@@ -1304,34 +1313,59 @@ main() {
 		SER=0
 		TOTAL=$(echo "$CHECKSUM_LIST" | wc -l)
 
-		if [ $FRZR_CHECK_UPDATE -eq 1 ]; then
-			# echo "check update" >&2
-			for CHECKSUM in $CHECKSUM_LIST; do
-				FILE_NAME=$(echo "$IMG_LIST_STR" | grep $CHECKSUM | awk '{print $2}')
-				if [[ "$enable_fallback_url" == "true" ]]; then
-					FALLBACK_URL_AL=$(get_fallback_url_alist "${FILE_NAME}")
-					if [[ -n "$FALLBACK_URL_AL" ]]; then
-						FALLBACK_URL="${FALLBACK_URL_AL}"
-					else
-						FALLBACK_URL=""
-					fi
-					if [[ -n "$FALLBACK_URL" ]]; then
-						echo "使用备用下载 URL: ${FALLBACK_URL}" >&2
-					fi
-				fi
-			done
-		fi
-
-		# ── Try delta update (silently falls back to full if anything fails) ──
+		# ── Check for existing install ──
 		if [ -e "${SUBVOL}" ]; then
 			echo "${NAME} already installed; aborting"
 			exit 7
 		fi
 
+		# ── Gather delta update info (query only, no download) ──
 		BASELINE_PATH="${MOUNT_PATH}/baselines"
 		VERSION_PATH_DELTA=$(basename "${BASE_URL}")
+		DELTA_AVAILABLE=false
 
-		if try_get_delta_info "$BASE_URL" "$BRANCH" "$BASELINE_PATH" "$VERSION_PATH_DELTA" 2>/dev/null; then
+		if try_get_delta_info "$BASE_URL" "$BRANCH" "$BASELINE_PATH" "$VERSION_PATH_DELTA" 2>&1 >&2; then
+			DELTA_AVAILABLE=true
+		fi
+
+		# ── Gather fallback download URL ──
+		fallback_msg=""
+		if [[ "$enable_fallback_url" == "true" ]]; then
+			for CHECKSUM in $CHECKSUM_LIST; do
+				FILE_NAME=$(echo "$IMG_LIST_STR" | grep $CHECKSUM | awk '{print $2}')
+				FALLBACK_URL_AL=$(get_fallback_url_alist "${FILE_NAME}")
+				if [[ -n "$FALLBACK_URL_AL" ]]; then
+					FALLBACK_URL="${FALLBACK_URL_AL}"
+					fallback_msg="(alist)"
+					echo "使用备用下载 URL: ${FALLBACK_URL}" >&2
+				else
+					FALLBACK_URL=""
+				fi
+			done
+		fi
+
+		# ── --check mode: display info and exit ──
+		if [ $FRZR_CHECK_UPDATE -eq 1 ]; then
+			if [ "$DELTA_AVAILABLE" = true ]; then
+				local delta_size_hr
+				delta_size_hr=$(numfmt --to=iec ${DELTA_SIZE:-0} 2>/dev/null || echo "${DELTA_SIZE:-unknown}")
+				echo "Delta update available:" >&2
+				echo "  File: ${DELTA_FILENAME}" >&2
+				echo "  Size: ${delta_size_hr}" >&2
+				echo "  From: ${DELTA_BASELINE_NAME} -> ${NAME}" >&2
+				echo "  Parts: ${DELTA_PARTS:-1}" >&2
+				if [ -n "${DELTA_MANIFEST_SOURCE:-}" ]; then
+					echo "  Manifest source: ${DELTA_MANIFEST_SOURCE}" >&2
+				fi
+			else
+				echo "No delta update available (full download required)" >&2
+			fi
+			echo "${NAME}　${fallback_msg}"
+			exit 0 # let Steam know there is an update available
+		fi
+
+		# ── Try delta update (deploy mode only) ──
+		if [ "$DELTA_AVAILABLE" = true ]; then
 			echo "Delta update available: ${DELTA_FILENAME} ($(numfmt --to=iec ${DELTA_SIZE:-0} 2>/dev/null || echo "${DELTA_SIZE}") vs full)" >&2
 
 			DELTA_IMG_FILE=""
@@ -1369,7 +1403,6 @@ main() {
 			SUB_IMG_FILE="${MOUNT_PATH}/${FILE_NAME}"
 			SUB_IMG_URL="${BASE_URL}/${FILE_NAME}"
 
-			# echo "enable_fallback_url: ${enable_fallback_url}" >&2
 			if [[ "$enable_fallback_url" == "true" ]]; then
 				FALLBACK_URL_AL=$(get_fallback_url_alist "${FILE_NAME}")
 				if [[ -n "$FALLBACK_URL_AL" ]]; then
@@ -1379,7 +1412,6 @@ main() {
 				fi
 			fi
 
-			# if the fallback url is not empty, set the img_url to the fallback url
 			if [[ -n "$FALLBACK_URL" ]]; then
 				echo "备用下载 URL: ${FALLBACK_URL}" >&2
 				SUB_IMG_URL="${FALLBACK_URL}"
@@ -1387,18 +1419,7 @@ main() {
 
 			if [ -e ${SUBVOL} ]; then
 				echo "${NAME} already installed; aborting"
-				exit 7 # let Steam know there is no update available
-			fi
-
-			if [ $FRZR_CHECK_UPDATE -eq 1 ]; then
-				if [[ -n "$FALLBACK_URL_AL" ]]; then
-					fallback_msg="(alist)"
-				fi
-				if [[ -n "$FALLBACK_URL_JL" ]]; then
-					fallback_msg="(jlist)"
-				fi
-				echo "${NAME}　${fallback_msg}"
-				exit 0 # let Steam know there is an update available
+				exit 7
 			fi
 
 			echo "Downloading ${NAME} ($((SER + 1))/${TOTAL})..."
