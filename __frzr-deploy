@@ -803,7 +803,9 @@ try_get_delta_info() {
 
 	DELTA_MANIFEST_SOURCE=""
 	local manifest=""
-	manifest=$(try_delta_manifest_mirrors "$version_path" "$branch") || true
+	if [[ "${ENABLE_DELTA_MIRRORS:-true}" == "true" ]]; then
+		manifest=$(try_delta_manifest_mirrors "$version_path" "$branch") || true
+	fi
 
 	if [ -z "$manifest" ]; then
 		local manifest_url="${base_url}/delta-manifest-${branch}.json"
@@ -986,7 +988,10 @@ try_delta_deploy() {
 	# that don't exist in CI baseline, so they won't appear in the deletion list.
 	if [ -f "${target_subvol}/.delta-filelist" ]; then
 		echo "Reconciling with target file list..." >&2
-		local filelist="${target_subvol}/.delta-filelist"
+		local filelist
+		filelist=$(mktemp)
+		cp "${target_subvol}/.delta-filelist" "$filelist"
+		rm -f "${target_subvol}/.delta-filelist"
 		local actual_list
 		actual_list=$(mktemp)
 		(cd "${target_subvol}" && find . \
@@ -999,9 +1004,8 @@ try_delta_deploy() {
 			[ -z "$extra_file" ] && continue
 			rm -rf "${target_subvol:?}/${extra_file}"
 			extra_count=$((extra_count + 1))
-		done < <(comm -23 "$actual_list" "$filelist")
-		rm -f "$actual_list"
-		rm -f "$filelist"
+		done < <(LC_ALL=C comm -23 "$actual_list" "$filelist")
+		rm -f "$actual_list" "$filelist"
 		if [ "$extra_count" -gt 0 ]; then
 			echo "Removed $extra_count extra files from device baseline" >&2
 		fi
@@ -1237,6 +1241,8 @@ main() {
 		fi
 
 		# echo "配置加载: API CDN=${enable_api_cdn}, Release CDN=${enable_release_cdn}, Fallback=${enable_fallback_url}, Gitee API=${enable_gitee_api}, Gitee 校验=${enable_gitee_checksum}" >&2
+
+		ENABLE_DELTA_MIRRORS="$enable_gitee_api"
 
 		GITHUB_CDN_FILE="/etc/github_cdn.conf"
 		if [ -f "${GITHUB_CDN_FILE}" ]; then
