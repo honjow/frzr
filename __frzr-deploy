@@ -461,12 +461,11 @@ clean_progress_loop() {
 	local last_value=$max_progress
 
 	every_progress=$((max_progress / loop_count))
-	start_progress=$((SER * every_progress))
-	end_progress=$(((SER + 1) * every_progress))
+	start_progress=$((current_loop * every_progress))
+	end_progress=$(((current_loop + 1) * every_progress))
 	scale=$((end_progress - start_progress))
 
 	while IFS= read -r line || [[ -n "$line" ]]; do
-		# 检查输入行是否为有效数字
 		if ! [[ "$line" =~ ^[0-9]+$ ]]; then
 			continue
 		fi
@@ -477,6 +476,89 @@ clean_progress_loop() {
 			last_value=$value
 		fi
 	done
+}
+
+# Unified download function with progress feedback for Steam/whiptail/TTY.
+# Args: url output_dir output_name [checksum] [label] [ser] [total]
+# Returns: 0 on success (file at output_dir/output_name), 1 on failure.
+# Progress output goes to stdout (Steam reads it); logs go to stderr.
+download_file() {
+	local url="$1"
+	local output_dir="$2"
+	local output_name="$3"
+	local checksum="${4:-}"
+	local label="${5:-Downloading}"
+	local ser="${6:-0}"
+	local total="${7:-1}"
+	local output_path="${output_dir}/${output_name}"
+
+	local aria2c_cs_args=""
+	if [ -n "$checksum" ]; then
+		aria2c_cs_args="--checksum=sha-256=${checksum}"
+	fi
+
+	if command -v aria2c >/dev/null 2>&1; then
+		if [ "${FRZR_STEAM_PROGRESS:-0}" -eq 1 ]; then
+			aria2c --connect-timeout=15 --file-allocation=none -x 16 -s 16 \
+				${aria2c_cs_args} --auto-file-renaming=false --allow-overwrite=true \
+				--console-log-level=warn --stderr=true -o "${output_name}" -d "${output_dir}" "${url}" 2>&1 |
+				grep --line-buffered -oP '\d+(?=%)' | clean_progress_loop 91 $ser $total %
+		elif [ -z ${SHOW_UI+x} ] || [ -z ${SHOW_UI} ]; then
+			echo "downloading ${output_name}..." >&2
+			if [ -t 1 ]; then
+				aria2c --connect-timeout=15 --file-allocation=none -x 16 -s 16 \
+					${aria2c_cs_args} --auto-file-renaming=false --allow-overwrite=true \
+					--console-log-level=warn -o "${output_name}" -d "${output_dir}" "${url}" >&2
+			else
+				aria2c --connect-timeout=15 --file-allocation=none -x 16 -s 16 \
+					${aria2c_cs_args} --auto-file-renaming=false --allow-overwrite=true \
+					--console-log-level=warn --stderr=true -o "${output_name}" -d "${output_dir}" "${url}" 2>&1 |
+					stdbuf -oL tr '\r' '\n' >&2
+			fi
+		else
+			aria2c --connect-timeout=15 --file-allocation=none -x 16 -s 16 \
+				${aria2c_cs_args} --auto-file-renaming=false --allow-overwrite=true \
+				--console-log-level=warn --stderr=true -o "${output_name}" -d "${output_dir}" "${url}" 2>&1 |
+				grep --line-buffered -oP '\d+(?=%)' | clean_progress_loop 100 $ser $total |
+				whiptail --gauge "$label" 10 50 0 3>&1 1>&2 2>&3
+		fi
+	else
+		if [ "${FRZR_STEAM_PROGRESS:-0}" -eq 1 ]; then
+			curl --connect-timeout 15 --http1.1 -# -L -o "${output_path}" -C - "${url}" 2>&1 |
+				stdbuf -oL tr '\r' '\n' | grep --line-buffered -oP '[0-9]*+(?=.[0-9])' |
+				clean_progress_loop 91 $ser $total %
+		elif [ -z ${SHOW_UI+x} ] || [ -z ${SHOW_UI} ]; then
+			echo "downloading ${output_name}..." >&2
+			if [ -t 1 ]; then
+				curl --connect-timeout 15 --http1.1 -L -o "${output_path}" -C - "${url}" >&2
+			else
+				curl --connect-timeout 15 --http1.1 -# -L -o "${output_path}" -C - "${url}" 2>&1 |
+					stdbuf -oL tr '\r' '\n' >&2
+			fi
+		else
+			curl --connect-timeout 15 --http1.1 -# -L -o "${output_path}" -C - "${url}" 2>&1 |
+				stdbuf -oL tr '\r' '\n' | grep --line-buffered -oP '[0-9]*+(?=.[0-9])' |
+				clean_progress_loop 100 $ser $total |
+				whiptail --gauge "$label" 10 50 0 3>&1 1>&2 2>&3
+		fi
+	fi
+
+	if [ ! -f "$output_path" ]; then
+		echo "Download failed: ${output_name}" >&2
+		return 1
+	fi
+
+	if [ -n "$checksum" ]; then
+		local actual_cs
+		actual_cs=$(sha256sum "$output_path" | awk '{print $1}')
+		if [ "$actual_cs" != "$checksum" ]; then
+			echo "Checksum mismatch for ${output_name}" >&2
+			rm -f "$output_path"
+			return 1
+		fi
+	fi
+
+	return 0
 }
 
 # Function to retrieve values from a .conf file
@@ -875,24 +957,12 @@ try_delta_download() {
 		for i in $(seq 1 "$delta_parts"); do
 			local part_file="${delta_filename_no_ext}.part${i}-${delta_parts}.skdelta"
 			local part_url="${base_url}/${part_file}"
-			local part_path="${mount_path}/${part_file}"
+			local part_cs="${cs_array[$cs_idx]:-}"
 
 			echo "Downloading delta part ${i}/${delta_parts}: ${part_file}" >&2
-			if command -v aria2c >/dev/null 2>&1; then
-				aria2c --connect-timeout=15 --file-allocation=none -x 16 -s 16 \
-					--auto-file-renaming=false --allow-overwrite=true \
-					--console-log-level=warn -o "$part_file" -d "$mount_path" "$part_url" >&2 || return 1
-			else
-				curl --connect-timeout 15 --http1.1 -L -o "$part_path" -C - "$part_url" >&2 || return 1
-			fi
-
-			if [ ${#cs_array[@]} -gt 0 ] && [ -n "${cs_array[$cs_idx]:-}" ]; then
-				local actual_cs
-				actual_cs=$(sha256sum "$part_path" | awk '{print $1}')
-				if [ "$actual_cs" != "${cs_array[$cs_idx]}" ]; then
-					echo "Delta part $i checksum mismatch" >&2
-					return 1
-				fi
+			if ! download_file "$part_url" "$mount_path" "$part_file" \
+				"$part_cs" "下载增量包 (${i}/${delta_parts})" "$((i - 1))" "$delta_parts"; then
+				return 1
 			fi
 			cs_idx=$((cs_idx + 1))
 		done
@@ -900,20 +970,16 @@ try_delta_download() {
 		local merged_file="${mount_path}/${delta_filename}"
 		merged_file=$(handle_multipart_image "$merged_file")
 		[ $? -eq 0 ] || return 1
-		echo "$merged_file"
+		DELTA_IMG_FILE="$merged_file"
 	else
 		local delta_url="${base_url}/${delta_filename}"
-		local delta_path="${mount_path}/${delta_filename}"
 
 		echo "Downloading delta: ${delta_filename}" >&2
-		if command -v aria2c >/dev/null 2>&1; then
-			aria2c --connect-timeout=15 --file-allocation=none -x 16 -s 16 \
-				--auto-file-renaming=false --allow-overwrite=true \
-				--console-log-level=warn -o "$delta_filename" -d "$mount_path" "$delta_url" >&2 || return 1
-		else
-			curl --connect-timeout 15 --http1.1 -L -o "$delta_path" -C - "$delta_url" >&2 || return 1
+		if ! download_file "$delta_url" "$mount_path" "$delta_filename" \
+			"$delta_checksum" "下载增量包" 0 1; then
+			return 1
 		fi
-		echo "$delta_path"
+		DELTA_IMG_FILE="${mount_path}/${delta_filename}"
 	fi
 
 	return 0
@@ -1044,6 +1110,7 @@ try_delta_deploy() {
 			done < "${target_subvol}/.delta-attrs"
 			rm -f "${target_subvol}/.delta-attrs"
 		fi
+		rm -f "${target_subvol}/.delta-meta.json"
 	fi
 
 	reconcile_delta_filelist "${target_subvol}"
@@ -1177,7 +1244,7 @@ main() {
 	if [ -n "$FRZR_SOURCE" ] && [ "$FRZR_SOURCE" != " " ] &&
 		[ $FRZR_CHECK_UPDATE -eq 0 ] && [ $FRZR_STEAM_PROGRESS -eq 0 ] &&
 		[ -z "${local_install}" ]; then
-		if [[ ! "$FRZR_SOURCE" =~ \.img(\.tar\.xz|\.xz|\.zst)?|\.skosys$ ]]; then
+		if [[ ! "$FRZR_SOURCE" =~ \.img(\.tar\.xz|\.xz|\.zst)?|\.skosys$|\.skdelta$ ]]; then
 			echo "$FRZR_SOURCE" >"${MOUNT_PATH}/source"
 		else
 			base_name=$(basename "${FRZR_SOURCE}")
@@ -1230,15 +1297,115 @@ main() {
 		echo "Using device: $FRZR_DEV"
 		mount -o rw "$FRZR_DEV" /root/tmp_source
 
-		# find the matching file
-		if IMG_FILE=$(find /root/tmp_source -maxdepth 1 -type f -regex ".*\.img\(\.tar\.xz\|\.xz\|\.zst\)?|\.skosys$" | head -n1); then
-			FILE_NAME=$(basename "${IMG_FILE}")
-			NAME=$(echo "${FILE_NAME}" | cut -f 1 -d '.')
-			SUBVOL="${DEPLOY_PATH}/${NAME}"
-		else
-			echo "No valid image file found in FRZR_UPDATE partition"
+		# find the matching file - prefer .skdelta for smaller updates
+		local usb_delta_file=""
+		usb_delta_file=$(find /root/tmp_source -maxdepth 1 -type f -name "*.skdelta" | head -n1) || true
+
+		if [ -n "$usb_delta_file" ]; then
+			echo "Found delta file on USB: $(basename "$usb_delta_file")" >&2
+			usb_delta_file=$(handle_multipart_image "$usb_delta_file")
+			local usb_meta=""
+			usb_meta=$(xz -dc "$usb_delta_file" | tar xf - -O .delta-meta.json 2>/dev/null) || true
+			if [ -n "$usb_meta" ]; then
+				local usb_from_ver usb_target_name usb_baseline
+				usb_from_ver=$(echo "$usb_meta" | jq -r '.from_version')
+				usb_target_name=$(echo "$usb_meta" | jq -r '.target_name // ""')
+				BASELINE_PATH="${MOUNT_PATH}/baselines"
+				usb_baseline=""
+				if [ -d "$BASELINE_PATH" ]; then
+					usb_baseline=$(find "$BASELINE_PATH" -maxdepth 1 -type d -name "*${usb_from_ver}*" | head -1)
+				fi
+				if [ -n "$usb_baseline" ]; then
+					DELTA_FORMAT=$(echo "$usb_meta" | jq -r '.format // "tar"')
+					DELTA_TARGET_META_HASH=$(echo "$usb_meta" | jq -r '.target_meta_hash // ""')
+					if [ -n "$usb_target_name" ] && [ "$usb_target_name" != "null" ]; then
+						NAME="$usb_target_name"
+					else
+						NAME=$(basename "$usb_delta_file" .skdelta | sed 's/\.from_.*//')
+					fi
+					SUBVOL="${DEPLOY_PATH}/${NAME}"
+					echo "Applying USB delta: $(basename "$usb_baseline") -> $NAME (format: $DELTA_FORMAT)" >&2
+					if try_delta_deploy "$usb_delta_file" "$usb_baseline" "$SUBVOL" \
+						"$DELTA_TARGET_META_HASH" "$DELTA_FORMAT"; then
+						DELTA_SUCCESS=true
+						echo "USB delta update applied successfully" >&2
+					else
+						echo "USB delta deploy failed, falling back to full image" >&2
+					fi
+				else
+					echo "No matching baseline for USB delta (need: $usb_from_ver), trying full image" >&2
+				fi
+			else
+				echo "USB delta has no embedded metadata, trying full image" >&2
+			fi
+		fi
+
+		if [ "$DELTA_SUCCESS" != "true" ]; then
+			if IMG_FILE=$(find /root/tmp_source -maxdepth 1 -type f -regex ".*\.img\(\.tar\.xz\|\.xz\|\.zst\)\?$\|.*\.skosys$" | head -n1) && [ -n "$IMG_FILE" ]; then
+				FILE_NAME=$(basename "${IMG_FILE}")
+				NAME=$(echo "${FILE_NAME}" | cut -f 1 -d '.')
+				SUBVOL="${DEPLOY_PATH}/${NAME}"
+			else
+				echo "No valid image file found in FRZR_UPDATE partition"
+				exit 1
+			fi
+		fi
+
+	elif [[ "$FRZR_SOURCE" =~ \.skdelta$ ]]; then
+		echo "Using local delta file: ${FRZR_SOURCE}" >&2
+		local DELTA_FILE="${FRZR_SOURCE}"
+
+		if [ ! -f "$DELTA_FILE" ]; then
+			echo "Delta file not found: $DELTA_FILE" >&2
 			exit 1
 		fi
+
+		DELTA_FILE=$(handle_multipart_image "$DELTA_FILE")
+
+		local meta_json=""
+		meta_json=$(xz -dc "$DELTA_FILE" | tar xf - -O .delta-meta.json 2>/dev/null) || true
+		if [ -z "$meta_json" ]; then
+			echo "No .delta-meta.json in delta package (old format without embedded metadata)" >&2
+			exit 1
+		fi
+
+		DELTA_FORMAT=$(echo "$meta_json" | jq -r '.format // "tar"')
+		local from_version
+		from_version=$(echo "$meta_json" | jq -r '.from_version')
+		local target_name_from_meta
+		target_name_from_meta=$(echo "$meta_json" | jq -r '.target_name // ""')
+		DELTA_TARGET_META_HASH=$(echo "$meta_json" | jq -r '.target_meta_hash // ""')
+
+		if [ -n "$target_name_from_meta" ] && [ "$target_name_from_meta" != "null" ]; then
+			NAME="$target_name_from_meta"
+		else
+			NAME=$(basename "$DELTA_FILE" .skdelta | sed 's/\.from_.*//')
+		fi
+		SUBVOL="${DEPLOY_PATH}/${NAME}"
+
+		BASELINE_PATH="${MOUNT_PATH}/baselines"
+		local baseline=""
+		if [ -d "$BASELINE_PATH" ]; then
+			baseline=$(find "$BASELINE_PATH" -maxdepth 1 -type d -name "*${from_version}*" | head -1)
+		fi
+		if [ -z "$baseline" ]; then
+			echo "No matching baseline for version ${from_version}" >&2
+			echo "Available baselines:" >&2
+			ls -1 "$BASELINE_PATH" 2>/dev/null || echo "  (none)" >&2
+			exit 1
+		fi
+
+		echo "  Baseline: $(basename "$baseline")" >&2
+		echo "  Target:   $NAME" >&2
+		echo "  Format:   $DELTA_FORMAT" >&2
+
+		if ! try_delta_deploy "$DELTA_FILE" "$baseline" "$SUBVOL" \
+			"$DELTA_TARGET_META_HASH" "$DELTA_FORMAT"; then
+			echo "Delta deploy failed" >&2
+			exit 1
+		fi
+		DELTA_SUCCESS=true
+		echo "Offline delta update applied successfully" >&2
 
 	elif [[ "$FRZR_SOURCE" =~ \.img(\.tar\.xz|\.xz|\.zst)?|\.skosys$ ]]; then
 		echo "Using local image file: ${FRZR_SOURCE}" >&2
@@ -1545,8 +1712,10 @@ main() {
 			echo "Delta update available: ${DELTA_FILENAME} ($(numfmt --to=iec ${DELTA_SIZE:-0} 2>/dev/null || echo "${DELTA_SIZE}") vs full)" >&2
 
 			DELTA_IMG_FILE=""
-			DELTA_IMG_FILE=$(try_delta_download "$BASE_URL" "$MOUNT_PATH" \
-				"$DELTA_FILENAME" "$DELTA_CHECKSUM" "$DELTA_PARTS" "$DELTA_PART_CHECKSUMS" 2>&1 | tail -1) || true
+			if try_delta_download "$BASE_URL" "$MOUNT_PATH" \
+				"$DELTA_FILENAME" "$DELTA_CHECKSUM" "$DELTA_PARTS" "$DELTA_PART_CHECKSUMS"; then
+				:
+			fi
 
 			if [ -n "$DELTA_IMG_FILE" ] && [ -f "$DELTA_IMG_FILE" ]; then
 				local actual_cs
@@ -1577,7 +1746,6 @@ main() {
 		for CHECKSUM in $CHECKSUM_LIST; do
 
 			FILE_NAME=$(echo "$IMG_LIST_STR" | grep $CHECKSUM | awk '{print $2}')
-			SUB_IMG_FILE="${MOUNT_PATH}/${FILE_NAME}"
 			SUB_IMG_URL="${BASE_URL}/${FILE_NAME}"
 
 			if [[ "$enable_fallback_url" == "true" ]]; then
@@ -1601,69 +1769,8 @@ main() {
 
 			echo "Downloading ${NAME} ($((SER + 1))/${TOTAL})..."
 
-			if [[ -x "$(command -v aria2c)" ]]; then
-				if [ $FRZR_STEAM_PROGRESS -eq 1 ]; then
-					max_progress=91
-
-					aria2c --connect-timeout=15 --file-allocation=none -x 16 -s 16 \
-						--checksum=sha-256="${CHECKSUM}" --auto-file-renaming=false --allow-overwrite=true \
-						--console-log-level=warn --stderr=true -o "${FILE_NAME}" -d "${MOUNT_PATH}" "${SUB_IMG_URL}" 2>&1 |
-						grep --line-buffered -oP '\d+(?=%)' | clean_progress_loop $max_progress $SER $TOTAL %
-				elif [ -z ${SHOW_UI} ]; then
-					echo "downloading ${FILE_NAME}..."
-					# Check if stdout is a TTY (terminal) or pipe/redirect
-					if [ -t 1 ]; then
-						# Terminal: keep aria2c's default behavior (overwrite line)
-						aria2c --connect-timeout=15 --file-allocation=none -x 16 -s 16 \
-							--checksum=sha-256="${CHECKSUM}" --auto-file-renaming=false --allow-overwrite=true \
-							--console-log-level=warn -o "${FILE_NAME}" -d "${MOUNT_PATH}" "${SUB_IMG_URL}"
-					else
-						# Pipe/redirect: convert \r to \n for real-time line-by-line output
-						aria2c --connect-timeout=15 --file-allocation=none -x 16 -s 16 \
-							--checksum=sha-256="${CHECKSUM}" --auto-file-renaming=false --allow-overwrite=true \
-							--console-log-level=warn --stderr=true -o "${FILE_NAME}" -d "${MOUNT_PATH}" "${SUB_IMG_URL}" 2>&1 |
-							stdbuf -oL tr '\r' '\n'
-					fi
-				else
-					max_progress=100
-
-					aria2c --connect-timeout=15 --file-allocation=none -x 16 -s 16 \
-						--checksum=sha-256="${CHECKSUM}" --auto-file-renaming=false --allow-overwrite=true \
-						--console-log-level=warn --stderr=true -o "${FILE_NAME}" -d "${MOUNT_PATH}" "${SUB_IMG_URL}" 2>&1 |
-						grep --line-buffered -oP '\d+(?=%)' | clean_progress_loop $max_progress $SER $TOTAL |
-						whiptail --gauge "下载系统镜像 (${NAME}) " 10 50 0 3>&1 1>&2 2>&3
-				fi
-			else
-				if [ $FRZR_STEAM_PROGRESS -eq 1 ]; then
-					max_progress=91
-
-					curl --connect-timeout 15 --http1.1 -# -L -o "${SUB_IMG_FILE}" -C - "${SUB_IMG_URL}" 2>&1 |
-						stdbuf -oL tr '\r' '\n' | grep --line-buffered -oP '[0-9]*+(?=.[0-9])' |
-						clean_progress_loop $max_progress $SER $TOTAL %
-				elif [ -z ${SHOW_UI} ]; then
-					echo "downloading ${FILE_NAME}..."
-					# Check if stdout is a TTY (terminal) or pipe/redirect
-					if [ -t 1 ]; then
-						# Terminal: keep curl's default behavior (overwrite line)
-						curl --connect-timeout 15 --http1.1 -L -o "${SUB_IMG_FILE}" -C - "${SUB_IMG_URL}"
-					else
-						# Pipe/redirect: convert \r to \n for real-time line-by-line output
-						curl --connect-timeout 15 --http1.1 -# -L -o "${SUB_IMG_FILE}" -C - "${SUB_IMG_URL}" 2>&1 |
-							stdbuf -oL tr '\r' '\n'
-					fi
-				else
-					max_progress=100
-
-					curl --connect-timeout 15 --http1.1 -# -L -o "${SUB_IMG_FILE}" -C - "${SUB_IMG_URL}" 2>&1 |
-						stdbuf -oL tr '\r' '\n' | grep --line-buffered -oP '[0-9]*+(?=.[0-9])' |
-						clean_progress_loop $max_progress $SER $TOTAL |
-						whiptail --gauge "下载系统镜像 (${NAME})" 10 50 0 3>&1 1>&2 2>&3
-				fi
-			fi
-
-			CHECKSUM_CALCULATED=$(sha256sum "${SUB_IMG_FILE}" | cut -d' ' -f 1)
-			if [ "$CHECKSUM" != "$CHECKSUM_CALCULATED" ]; then
-				rm -f "${SUB_IMG_FILE}"
+			if ! download_file "$SUB_IMG_URL" "$MOUNT_PATH" "$FILE_NAME" \
+				"$CHECKSUM" "下载系统镜像 (${NAME})" "$SER" "$TOTAL"; then
 				echo "checksum does not match; aborting"
 				exit 1
 			fi
