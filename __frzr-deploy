@@ -476,6 +476,10 @@ clean_progress_loop() {
 			last_value=$value
 		fi
 	done
+
+	if [ "$last_value" != "$end_progress" ]; then
+		echo ${end_progress}${postfix}
+	fi
 }
 
 # Unified download function with progress feedback for Steam/whiptail/TTY.
