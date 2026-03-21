@@ -1692,6 +1692,20 @@ main() {
 
 		# ── --check mode: display info and exit ──
 		if [ $FRZR_CHECK_UPDATE -eq 1 ]; then
+			local SEP=$'\t'
+			local check_output="${NAME}"
+
+			# Calculate full image size from release API JSON
+			local file_names
+			file_names=$(echo "$IMG_LIST_STR" | awk '{print $2}')
+			local full_size
+			full_size=$(echo "$RELEASES" | jq -r --arg names "$file_names" '
+				($names | split("\n") | map(select(. != ""))) as $fnames |
+				[.[] | .assets[]? | select(.name as $n | $fnames | any(. == $n)) | .size] | add // 0
+			' 2>/dev/null || echo "0")
+			local full_size_hr
+			full_size_hr=$(numfmt --to=iec ${full_size:-0} 2>/dev/null || echo "?")
+
 			if [ "$DELTA_AVAILABLE" = true ]; then
 				local delta_size_hr
 				delta_size_hr=$(numfmt --to=iec ${DELTA_SIZE:-0} 2>/dev/null || echo "${DELTA_SIZE:-unknown}")
@@ -1704,10 +1718,23 @@ main() {
 				if [ -n "${DELTA_MANIFEST_SOURCE:-}" ]; then
 					echo "  Manifest source: ${DELTA_MANIFEST_SOURCE}" >&2
 				fi
+				if [ "${DELTA_SIZE:-0}" -gt 0 ] 2>/dev/null; then
+					check_output="${check_output}${SEP}(Δ${SEP}${delta_size_hr})"
+				else
+					check_output="${check_output}${SEP}(Δ)"
+				fi
 			else
 				echo "No delta update available: ${DELTA_SKIP_REASON:-unknown reason}" >&2
+				if [ "${full_size:-0}" -gt 0 ] 2>/dev/null; then
+					check_output="${check_output}${SEP}(Σ${SEP}${full_size_hr})"
+				fi
 			fi
-			echo "${NAME}　${fallback_msg}"
+
+			if [ -n "${fallback_msg}" ]; then
+				check_output="${check_output}${SEP}${fallback_msg}"
+			fi
+
+			echo "${check_output}"
 			exit 0 # let Steam know there is an update available
 		fi
 
