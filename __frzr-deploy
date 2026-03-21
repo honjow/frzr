@@ -890,6 +890,14 @@ try_get_delta_info() {
 		return 1
 	fi
 
+	# Extract branch from baseline name and verify it matches target branch
+	local baseline_branch
+	baseline_branch=$(echo "$baseline_name" | sed -n 's/\(chimeraos\|skorionos\)-[0-9]\+\(-[0-9]\+\)\?_[a-f0-9]\+-//p')
+	if [ -n "$baseline_branch" ] && [ "$baseline_branch" != "$branch" ]; then
+		DELTA_SKIP_REASON="branch mismatch: baseline is ${baseline_branch}, target is ${branch}"
+		return 1
+	fi
+
 	DELTA_MANIFEST_SOURCE=""
 	local manifest=""
 	if [[ "${ENABLE_DELTA_MIRRORS:-true}" == "true" ]]; then
