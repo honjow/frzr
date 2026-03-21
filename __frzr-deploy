@@ -1735,6 +1735,8 @@ main() {
 				echo "No delta update available: ${DELTA_SKIP_REASON:-unknown reason}" >&2
 				if [ "${full_size:-0}" -gt 0 ] 2>/dev/null; then
 					check_output="${check_output}${SEP}(Σ${SEP}${full_size_hr})"
+				else
+					check_output="${check_output}${SEP}(Σ)"
 				fi
 			fi
 
