@@ -26,167 +26,101 @@ decode_config() {
 decode_config
 
 get_img_url() {
-	CHANNEL=$1
+	local CHANNEL="$1"
+	local current_major="${2:-}"
 	local keywords="img|skosys"
 
 	echo "CHANNEL: $CHANNEL" >&2
 
-	# Order by creation date in reverse
-	result=$(jq 'sort_by(.created_at) | reverse')
+	# Preprocess: sort by date (newest first) + remove incomplete uploads
+	local releases
+	releases=$(jq 'sort_by(.created_at) | reverse |
+		del(.[] | select(.assets[].state != "uploaded"))')
 
-	# Remove entries which have not been completed uploading
-	result=$(echo "${result}" | jq 'del(.[] | select(.assets[].state != "uploaded"))')
-
-	# tt=$(echo "${result}" | jq -er '[ .[] ] | length')
-	# echo "tt: $tt" >&2
-
-	# Always check for stable date
-	if stable_release_date=$(
-		echo "${result}" | jq -er '[ .[] |
-			select(.prerelease==false) ] |
-			first |
-			.created_at'
-	); then
-		# Check for stable url, this is the latest that have prerelease == false
-		stable_download_url=$(
-			echo "${result}" | jq -r '[ .[] |
-			select(.prerelease==false) ] |
-			first |
-			.assets[] |
-			select(.browser_download_url | test("'$keywords'")) |
-			.browser_download_url'
-		)
+	# ── Find global stable release (prerelease==false) ──
+	local stable_info stable_date="" stable_tag="" stable_url=""
+	stable_info=$(_find_release "$releases" \
+		'.[] | select(.prerelease==false)' "$keywords")
+	if [ -n "$stable_info" ]; then
+		_parse_release_info "$stable_info"
+		stable_date="$_rel_date"; stable_tag="$_rel_tag"; stable_url="$_rel_url"
 	else
-		# No stable channel found, pick some (old) values
-		# For testing/ channel selection
-		stable_release_date="1970-01-01T00:00:00Z"
-		stable_download_url=""
+		stable_date="1970-01-01T00:00:00Z"
 	fi
 
-	# Filter channels by release naming conventions
+	# ── Channel dispatch ──
+	local result=""
+
 	if [[ "$CHANNEL" =~ ^[0-9]+\-?[0-9]*$ ]]; then
-		# Check first for explicit version numbers between stable releases
-		# Useful for downgrading
-		result=$(
-			echo "${result}" | jq -r "[ .[] |
-					select(.prerelease==false) |
-					select(.name|test(\" ${CHANNEL}\$\")) ] |
-					first |
-					.assets[] |
-					select(.browser_download_url | test(\"${keywords}\")) |
-					.browser_download_url"
-		)
+		# Explicit version number (for downgrading)
+		local ver_info
+		ver_info=$(_find_release "$releases" \
+			".[] | select(.prerelease==false) | select(.name|test(\" ${CHANNEL}\$\"))" "$keywords")
+		[ -n "$ver_info" ] && { _parse_release_info "$ver_info"; result="$_rel_url"; }
+
 	elif [ "$CHANNEL" == "stable" ]; then
-		result=$stable_download_url
+		result="$stable_url"
+
 	elif [ "$CHANNEL" == "testing" ]; then
-		# Testing channel have prerelease = true and no other tags
-		if testing_release_date=$(
-			echo "${result}" | jq -er '[ .[] |
-			select(.prerelease==true) |
-			select(.name|test("\\[.*\\]")|not) ] |
-			first |
-			.created_at'
-		); then
-			testing_url=$(
-				echo "${result}" | jq -r '[ .[] |
-						select(.prerelease==true) |
-						select(.name|test("\\[.*\\]")|not) ] |
-						first |
-						.assets[] |
-						select(.browser_download_url | test("'$keywords'")) |
-						.browser_download_url'
-			)
-
-			echo "testing_release_date: $testing_release_date" >&2
-			echo "stable_release_date: $stable_release_date" >&2
-			testing_release_time=$(date -d $testing_release_date +%s)
-			stable_release_time=$(date -d $stable_release_date +%s)
-
-			echo "testing_release_time: $testing_release_time" >&2
-			echo "stable_release_time: $stable_release_time" >&2
-
-			if [[ $testing_release_time -le $stable_release_time ]]; then
-				result=$stable_download_url
+		local test_info
+		test_info=$(_find_release "$releases" \
+			'.[] | select(.prerelease==true) | select(.name|test("\\[.*\\]")|not)' "$keywords")
+		if [ -n "$test_info" ]; then
+			_parse_release_info "$test_info"
+			echo "testing_release_date: $_rel_date" >&2
+			echo "stable_release_date: $stable_date" >&2
+			if [ -n "$stable_url" ] && \
+			   _should_use_stable "$_rel_date" "$stable_date" "$current_major" "$stable_tag"; then
+				result="$stable_url"
 			else
-				result=$testing_url
+				result="$_rel_url"
 			fi
 		else
-			result=$stable_download_url
+			result="$stable_url"
 		fi
-		# echo "result: $result" >&2
+
 	else
-		# 如果 CHANNEL 以 -任意字符结尾
+		# ── Tagged channel (e.g. kde-core, gnome-nv) ──
+		local CHANNEL_STABLE=""
+
+		# If channel has a sub-variant suffix, find the stable variant
 		if [[ "$CHANNEL" =~ -[^-]*$ ]]; then
-			# CHANNEL 去掉最后一个 - 及其后面的内容
 			CHANNEL_STABLE=$(echo "${CHANNEL}" | sed 's/-[^-]*$//')
 			echo "CHANNEL_STABLE: $CHANNEL_STABLE" >&2
-			result_stable=$(echo "${result}" | jq '[ .[] | select(.name|test("\\['${CHANNEL_STABLE}'\\]" ; "i")) ]')
 
-			if stable_release_date=$(
-				echo "${result_stable}" | jq -er '[ .[] |
-					select(.name|test("\\['${CHANNEL_STABLE}'\\]" ; "i")) ] |
-					first |
-					.created_at'
-			); then
-				stable_download_url=$(
-					echo "${result_stable}" | jq -r '[ .[] |
-					select(.name|test("\\['${CHANNEL_STABLE}'\\]" ; "i")) ] |
-					first |
-					.assets[] |
-					select(.browser_download_url | test("'$keywords'")) |
-					.browser_download_url'
-				)
+			local ch_stable_info
+			ch_stable_info=$(_find_release "$releases" \
+				".[] | select(.name|test(\"\\\\[${CHANNEL_STABLE}\\\\]\"; \"i\"))" "$keywords")
+			if [ -n "$ch_stable_info" ]; then
+				_parse_release_info "$ch_stable_info"
+				stable_date="$_rel_date"; stable_tag="$_rel_tag"; stable_url="$_rel_url"
 			else
 				echo "No stable channel found, pick some (old) values" >&2
-				stable_release_date="1970-01-01T00:00:00Z"
-				stable_download_url=""
+				stable_date="1970-01-01T00:00:00Z"
+				stable_url=""
 			fi
 		fi
 
-		# echo "stable_download_url is $stable_download_url" >&2
+		# Find the unstable/tagged release
+		local unstable_info
+		unstable_info=$(_find_release "$releases" \
+			".[] | select(.prerelease==true) | select(.name|test(\"\\\\[${CHANNEL}\\\\]\"; \"i\"))" "$keywords")
 
-		# Match any release with CHANNEL as a tag (including unstable)
-		result=$(echo "${result}" | jq '[ .[] | select(.prerelease==true) | select(.name|test("\\['${CHANNEL}'\\]" ; "i")) ]')
-		# echo "result is $result" >&2
-		if unstable_release_date=$(
-			echo "${result}" | jq -er '[ .[] |
-					select(.prerelease==true) |
-					select(.name|test("\\['${CHANNEL}'\\]" ; "i")) ] |
-					first |
-					.created_at'
-		); then
-			unstable_url=$(
-				echo "${result}" | jq -r '[ .[] |
-						select(.prerelease==true) |
-						select(.name|test("\\['${CHANNEL}'\\]" ; "i")) ] |
-						first |
-						.assets[] |
-						select(.browser_download_url | test("'$keywords'")) |
-						.browser_download_url'
-			)
+		if [ -n "$unstable_info" ]; then
+			_parse_release_info "$unstable_info"
+			echo "unstable_release_date: $_rel_date" >&2
+			echo "stable_release_date: $stable_date" >&2
 
-			echo "unstable_release_date: $unstable_release_date" >&2
-			echo "stable_release_date: $stable_release_date" >&2
-
-			unstable_release_time=$(date -d $unstable_release_date +%s)
-			stable_release_time=$(date -d $stable_release_date +%s)
-
-			echo "unstable_release_time: $unstable_release_time" >&2
-			echo "stable_release_time: $stable_release_time" >&2
-
-			# echo "unstable_url is $unstable_url" >&2
-
-			# CHANNEL 为 unstable 或者 CHANNEL_STABLE 不为空, 并且 unstable_release_time 小于等于 stable_release_time
-			if [[ "$CHANNEL" == "unstable" || -n "$CHANNEL_STABLE" ]] && [[ $unstable_release_time -le $stable_release_time ]]; then
-				result=$stable_download_url
+			if [[ "$CHANNEL" == "unstable" || -n "$CHANNEL_STABLE" ]] && \
+			   [ -n "$stable_url" ] && \
+			   _should_use_stable "$_rel_date" "$stable_date" "$current_major" "$stable_tag"; then
+				result="$stable_url"
 			else
-				result=$unstable_url
+				result="$_rel_url"
 			fi
-
 		else
-			result=$stable_download_url
+			result="$stable_url"
 		fi
-		# echo "result: $result" >&2
 	fi
 
 	echo $result
@@ -829,6 +763,64 @@ get_frzr_release() {
 	if [ -e /build_info ]; then
 		cat /build_info | head -1
 	fi
+}
+
+get_major_version() {
+	local input="$1"
+	if [[ "$input" =~ (chimeraos|skorionos)- ]]; then
+		input=$(get_version_from_name "$input")
+	fi
+	echo "$input" | grep -oP '^\d+'
+}
+
+# Query releases JSON: returns "created_at|tag_name|url1 url2 ..." or empty
+_find_release() {
+	local json="$1"
+	local filter="$2"
+	local kw="${3:-img|skosys}"
+	echo "$json" | jq -r --arg kw "$kw" \
+		"[$filter] | first // empty |
+		 .created_at + \"|\" + .tag_name + \"|\" +
+		 ([.assets[] | select(.browser_download_url | test(\$kw))
+		   | .browser_download_url] | join(\" \"))" 2>/dev/null
+}
+
+# Parse _find_release output into date/tag/url components
+_parse_release_info() {
+	local info="$1"
+	_rel_date=$(echo "$info" | cut -d'|' -f1)
+	_rel_tag=$(echo "$info" | cut -d'|' -f2)
+	_rel_url=$(echo "$info" | cut -d'|' -f3)
+}
+
+# Decide whether to fallback from candidate to stable (time + major version guard)
+_should_use_stable() {
+	local candidate_date="$1"
+	local stable_date="$2"
+	local current_major="$3"
+	local stable_tag="$4"
+
+	local candidate_time stable_time
+	candidate_time=$(date -d "$candidate_date" +%s)
+	stable_time=$(date -d "$stable_date" +%s)
+
+	echo "candidate_time: $candidate_time" >&2
+	echo "stable_time: $stable_time" >&2
+
+	# Candidate is newer than stable -> don't fallback
+	[ "$candidate_time" -gt "$stable_time" ] && return 1
+
+	# Version guard: don't fallback to a lower major version
+	if [ -n "$current_major" ] && [ -n "$stable_tag" ]; then
+		local stable_major
+		stable_major=$(get_major_version "$stable_tag")
+		if [ -n "$stable_major" ] && \
+		   [ "$current_major" -gt "$stable_major" ] 2>/dev/null; then
+			echo "Skip stable fallback: current($current_major) > stable($stable_major)" >&2
+			return 1
+		fi
+	fi
+	return 0
 }
 
 # ── Delta update support ──────────────────────────────────────────────
@@ -1554,7 +1546,12 @@ main() {
 			fi
 		fi
 
-		IMG_LIST_URL=$(echo $RELEASES | get_img_url "${CHANNEL}")
+		local current_major=""
+		local cur_rel
+		cur_rel=$(get_frzr_release)
+		[ -n "$cur_rel" ] && current_major=$(get_major_version "$cur_rel")
+
+		IMG_LIST_URL=$(echo $RELEASES | get_img_url "${CHANNEL}" "${current_major}")
 		if [[ -n "${DEBUG}" ]]; then
 			set -x
 		fi
