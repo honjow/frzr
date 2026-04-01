@@ -588,24 +588,36 @@ get_fallback_url_justlist() {
 
 get_fallback_url_alist() {
 	local img_file_name=$1
-	local timeout=${2:-10}  # Default timeout 10 seconds, can be overridden
+	local version_path=${2:-}
+	local subdir=${3:-}
+	local timeout=${4:-10}
 
-	fallback_base="https://ns.switchsystem.eu.org/d/vfs/guest/stos/img/"
-	image_url="${fallback_base}${img_file_name}"
+	local fallback_base="https://ns.switchsystem.eu.org/d/vfs/guest/stos/img/"
 
-	# Check initial response with timeout, handle curl failure gracefully under set -e
-	local initial_code
-	if initial_code=$(curl --http1.1 -s -o /dev/null -w "%{http_code}" -I \
-		--connect-timeout 5 \
-		--max-time "$timeout" \
-		--retry 0 \
-		"$image_url" 2>/dev/null); then
-		# Only check status code if curl succeeded
-		if [[ "$initial_code" =~ ^30[1278]$ ]]; then
-			echo "$image_url"
+	# 构建候选 URL 列表：优先新目录结构，回退旧扁平路径
+	local candidates=()
+	if [[ -n "$version_path" ]]; then
+		if [[ -n "$subdir" ]]; then
+			candidates+=("${fallback_base}${version_path}/${subdir}/${img_file_name}")
+		else
+			candidates+=("${fallback_base}${version_path}/${img_file_name}")
 		fi
 	fi
-	# If curl fails, function returns nothing (empty string)
+	candidates+=("${fallback_base}${img_file_name}")
+
+	for image_url in "${candidates[@]}"; do
+		local initial_code
+		if initial_code=$(curl --http1.1 -s -o /dev/null -w "%{http_code}" -I \
+			--connect-timeout 5 \
+			--max-time "$timeout" \
+			--retry 0 \
+			"$image_url" 2>/dev/null); then
+			if [[ "$initial_code" =~ ^30[1278]$ ]]; then
+				echo "$image_url"
+				return 0
+			fi
+		fi
+	done
 }
 
 # 验证校验文件内容格式是否符合SHA256规范
@@ -939,6 +951,24 @@ try_get_delta_info() {
 	return 0
 }
 
+# 解析增量包下载 URL：优先尝试 alist 镜像，失败回退到 GitHub
+resolve_delta_url() {
+	local base_url="$1"
+	local filename="$2"
+	local version_path="$3"
+
+	if [[ "${enable_fallback_url:-true}" == "true" && -n "$version_path" ]]; then
+		local mirror_url
+		mirror_url=$(get_fallback_url_alist "$filename" "$version_path" "delta" 8)
+		if [[ -n "$mirror_url" ]]; then
+			echo "使用镜像下载 delta: ${mirror_url}" >&2
+			echo "$mirror_url"
+			return 0
+		fi
+	fi
+	echo "${base_url}/${filename}"
+}
+
 try_delta_download() {
 	local base_url="$1"
 	local mount_path="$2"
@@ -946,6 +976,7 @@ try_delta_download() {
 	local delta_checksum="$4"
 	local delta_parts="${5:-1}"
 	local delta_part_checksums="$6"
+	local version_path="${7:-}"
 
 	local delta_filename_no_ext="${delta_filename%.skdelta}"
 
@@ -960,7 +991,8 @@ try_delta_download() {
 
 		for i in $(seq 1 "$delta_parts"); do
 			local part_file="${delta_filename_no_ext}.part${i}-${delta_parts}.skdelta"
-			local part_url="${base_url}/${part_file}"
+			local part_url
+			part_url=$(resolve_delta_url "$base_url" "$part_file" "$version_path")
 			local part_cs="${cs_array[$cs_idx]:-}"
 
 			echo "Downloading delta part ${i}/${delta_parts}: ${part_file}" >&2
@@ -976,7 +1008,8 @@ try_delta_download() {
 		[ $? -eq 0 ] || return 1
 		DELTA_IMG_FILE="$merged_file"
 	else
-		local delta_url="${base_url}/${delta_filename}"
+		local delta_url
+		delta_url=$(resolve_delta_url "$base_url" "$delta_filename" "$version_path")
 
 		echo "Downloading delta: ${delta_filename}" >&2
 		if ! download_file "$delta_url" "$mount_path" "$delta_filename" \
@@ -1684,7 +1717,7 @@ main() {
 		if [[ "$enable_fallback_url" == "true" ]]; then
 			for CHECKSUM in $CHECKSUM_LIST; do
 				FILE_NAME=$(echo "$IMG_LIST_STR" | grep $CHECKSUM | awk '{print $2}')
-				FALLBACK_URL_AL=$(get_fallback_url_alist "${FILE_NAME}")
+				FALLBACK_URL_AL=$(get_fallback_url_alist "${FILE_NAME}" "${VERSION_PATH:-}")
 				if [[ -n "$FALLBACK_URL_AL" ]]; then
 					FALLBACK_URL="${FALLBACK_URL_AL}"
 					fallback_msg="(alist)"
@@ -1751,7 +1784,8 @@ main() {
 
 			DELTA_IMG_FILE=""
 			if try_delta_download "$BASE_URL" "$MOUNT_PATH" \
-				"$DELTA_FILENAME" "$DELTA_CHECKSUM" "$DELTA_PARTS" "$DELTA_PART_CHECKSUMS"; then
+				"$DELTA_FILENAME" "$DELTA_CHECKSUM" "$DELTA_PARTS" "$DELTA_PART_CHECKSUMS" \
+				"${VERSION_PATH_DELTA:-}"; then
 				:
 			fi
 
@@ -1787,7 +1821,7 @@ main() {
 			SUB_IMG_URL="${BASE_URL}/${FILE_NAME}"
 
 			if [[ "$enable_fallback_url" == "true" ]]; then
-				FALLBACK_URL_AL=$(get_fallback_url_alist "${FILE_NAME}")
+				FALLBACK_URL_AL=$(get_fallback_url_alist "${FILE_NAME}" "${VERSION_PATH:-}")
 				if [[ -n "$FALLBACK_URL_AL" ]]; then
 					FALLBACK_URL="${FALLBACK_URL_AL}"
 				else
