@@ -1259,23 +1259,23 @@ main() {
 
 		TO_DELETE_BOOT=$(get_boot_to_delete ${CURRENT} ${BOOT_CFG} ${MOUNT_PATH}/boot)
 
-		if [ -n "${TO_DELETE}" ]; then
-			for deployment in ${TO_DELETE}; do
-				echo "deleting ${deployment}..."
-				rm -rf "${MOUNT_PATH}/boot/${deployment}" || true
-				btrfs subvolume delete "${DEPLOY_PATH}/${deployment}" || true
-			done
-		fi
+	if [ -n "${TO_DELETE}" ]; then
+		for deployment in ${TO_DELETE}; do
+			echo "deleting ${deployment}..."
+			rm -rf "${MOUNT_PATH}/boot/${deployment}" || true
+			btrfs subvolume delete "${DEPLOY_PATH}/${deployment}" || true
+		done
+	fi
 
-		if [ -n "${TO_DELETE_BOOT}" ]; then
-			# if multiple boot entries are found, delete all of them
-			for boot_entry in ${TO_DELETE_BOOT}; do
-				echo "deleting boot entry ${boot_entry}..."
-				rm -rf "${MOUNT_PATH}/boot/${boot_entry}" || true
-			done
-		fi
+	if [ -n "${TO_DELETE_BOOT}" ]; then
+		for boot_entry in ${TO_DELETE_BOOT}; do
+			echo "deleting boot entry ${boot_entry}..."
+			rm -rf "${MOUNT_PATH}/boot/${boot_entry}" || true
+		done
+	fi
 
-		rm -f ${MOUNT_PATH}/boot/*.img.tmp || true
+	rm -f ${MOUNT_PATH}/boot/*.img.tmp || true
+	sync
 	fi
 
 	if [ -n "$FRZR_SOURCE" ] && [ "$FRZR_SOURCE" != " " ] &&
@@ -1909,6 +1909,7 @@ main() {
 	mkdir -p ${MOUNT_PATH}/boot/${NAME}
 	cp ${SUBVOL}/boot/vmlinuz-linux ${MOUNT_PATH}/boot/${NAME}
 	cp ${SUBVOL}/boot/initramfs-linux.img ${MOUNT_PATH}/boot/${NAME}
+	sync
 
 	echo "show boot files"
 	ls -R ${SUBVOL}/boot/
@@ -1933,6 +1934,7 @@ main() {
 			cp ${SUBVOL}/boot/intel-ucode.img ${MOUNT_PATH}/boot/${NAME}
 			INTEL_UCODE="initrd /${NAME}/intel-ucode.img"
 		fi
+		sync
 	fi
 
 	ADDITIONAL_ARGUMENTS=""
@@ -1962,6 +1964,13 @@ main() {
 	echo "${BOOT_CFG_PARA}" >${BOOT_CFG}
 	export BOOT_CFG_PARA="${BOOT_CFG_PARA}"
 	echo "default frzr.conf" >${MOUNT_PATH}/boot/loader/loader.conf
+	sync
+
+	# Backup boot config to btrfs for recovery by frzr-esp-guard initramfs hook
+	BOOT_BACKUP_DIR="${MOUNT_PATH}/boot_backup"
+	mkdir -p "${BOOT_BACKUP_DIR}"
+	cp "${BOOT_CFG}" "${BOOT_BACKUP_DIR}/frzr.conf.bak"
+	cp "${MOUNT_PATH}/boot/loader/loader.conf" "${BOOT_BACKUP_DIR}/loader.conf.bak"
 
 	# Check if there are migrations available
 	if compgen -G "${SUBVOL}"/usr/lib/frzr.d/*.migration >/dev/null; then
@@ -1990,6 +1999,14 @@ main() {
 
 	# Run frzr-initramfs to create mkinicpio.conf and build an initramfs
 	frzr-initramfs
+
+	# Re-sync rebuilt initramfs to ESP (frzr-initramfs rebuilds inside the subvol)
+	if [ -f "${SUBVOL}/boot/initramfs-linux.img" ]; then
+		if ! cmp -s "${SUBVOL}/boot/initramfs-linux.img" "${MOUNT_PATH}/boot/${NAME}/initramfs-linux.img" 2>/dev/null; then
+			cp "${SUBVOL}/boot/initramfs-linux.img" "${MOUNT_PATH}/boot/${NAME}/initramfs-linux.img"
+			sync
+		fi
+	fi
 
 	# check and clean etc
 	CURRENT_BRANCH=$(get_branch "${CURRENT}")
