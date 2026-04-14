@@ -200,19 +200,25 @@ process_deployed_system() {
         build_initramfs_for_deployment "/frzr_root/boot" "$ID" "$BUILD" "$microcode_flag"
     fi
     
-    # Sync rebuilt initramfs back to btrfs deployment (source of truth for frzr-esp-guard)
-    local boot_path="/frzr_root/boot"
-    if [[ -d "/efi/$BUILD" ]]; then
-        boot_path="/efi"
-    fi
-    for file in initramfs-linux.img; do
-        if [[ -f "${boot_path}/${file}" ]] && [[ -f "${DEPLOYMENT_PATH}/boot/${file}" ]]; then
-            if ! cmp -s "${boot_path}/${file}" "${DEPLOYMENT_PATH}/boot/${file}"; then
-                cp "${boot_path}/${file}" "${DEPLOYMENT_PATH}/boot/${file}"
-                log_info "Synced ${file} to deployment"
-            fi
+    # Sync rebuilt initramfs back to btrfs deployment (source of truth for frzr-esp-guard).
+    # Only applies when build_initramfs_for_deployment was used (SUBVOL not set), where the
+    # initramfs is built directly to the ESP and needs to be backed up into the subvol.
+    # When SUBVOL is set, build_initramfs_in_subvol was used: the initramfs is already inside
+    # the subvol (and the subvol is re-locked by that function), so no sync is needed here.
+    if [ -z "$SUBVOL" ]; then
+        local boot_path="/frzr_root/boot"
+        if [[ -d "/efi/$BUILD" ]]; then
+            boot_path="/efi"
         fi
-    done
+        for file in initramfs-linux.img; do
+            if [[ -f "${boot_path}/${file}" ]] && [[ -f "${DEPLOYMENT_PATH}/boot/${file}" ]]; then
+                if ! cmp -s "${boot_path}/${file}" "${DEPLOYMENT_PATH}/boot/${file}"; then
+                    cp "${boot_path}/${file}" "${DEPLOYMENT_PATH}/boot/${file}"
+                    log_info "Synced ${file} to deployment"
+                fi
+            fi
+        done
+    fi
 
     if [[ $RELOCK == 1 ]]; then
         btrfs property set -fts ${DEPLOYMENT_PATH} ro true
