@@ -318,6 +318,28 @@ get_fbcon() {
 	fi
 }
 
+get_video() {
+
+	if [[ -x $(command -v parse-edid) ]]; then
+		local rotate_path
+		if [[ -f "/etc/sk-chos/screen-rotate" ]]; then
+			rotate_path="/etc/sk-chos/screen-rotate"
+		elif [[ -f "/usr/libexec/screen-rotate" ]]; then
+			rotate_path="/usr/libexec/screen-rotate"
+		else
+			rotate_path=""
+		fi
+
+		if [[ -n "$rotate_path" ]]; then
+			source $rotate_path
+			if [[ -n "${VIDEO_PARA:-}" ]]; then
+				echo "video=${VIDEO_PARA}"
+				return 0
+			fi
+		fi
+	fi
+}
+
 get_boot_cfg() {
 	local version=${1}
 	local amd_ucode=${2}
@@ -325,13 +347,18 @@ get_boot_cfg() {
 	local additional_arguments=${4}
 	local swap_arguments=${5}
 	local fbcon=${6}
+	local video=${7}
+
+	local extra_opts="${additional_arguments} ${swap_arguments} ${fbcon} ${video}"
+	# collapse multiple spaces and strip leading/trailing whitespace
+	extra_opts=$(echo "${extra_opts}" | tr -s ' ' | sed 's/^ //;s/ $//')
 
 	echo "title ${version}
 linux /${version}/vmlinuz-linux
 ${amd_ucode}
 ${intel_ucode}
 initrd /${version}/initramfs-linux.img
-options root=LABEL=frzr_root rw rootflags=subvol=deployments/${version} quiet splash loglevel=3 rd.systemd.show_status=auto rd.udev.log_priority=3 ${additional_arguments} ${swap_arguments} ${fbcon}"
+options root=LABEL=frzr_root rw rootflags=subvol=deployments/${version} quiet splash loglevel=3 rd.systemd.show_status=auto rd.udev.log_priority=3 ${extra_opts}"
 
 }
 
@@ -1958,9 +1985,10 @@ main() {
 	# create_nix "${MOUNT_PATH}"
 
 	FBCON="$(get_fbcon)"
+	VIDEO="$(get_video)"
 
 	# get_boot_cfg "${NAME}" "${AMD_UCODE}" "${INTEL_UCODE}" "${ADDITIONAL_ARGUMENTS}" "${SWAP_ARGUMENTS} ${FBCON}" > ${BOOT_CFG}
-	BOOT_CFG_PARA=$(get_boot_cfg "${NAME}" "${AMD_UCODE}" "${INTEL_UCODE}" "${ADDITIONAL_ARGUMENTS}" "${SWAP_ARGUMENTS}" "${FBCON}")
+	BOOT_CFG_PARA=$(get_boot_cfg "${NAME}" "${AMD_UCODE}" "${INTEL_UCODE}" "${ADDITIONAL_ARGUMENTS}" "${SWAP_ARGUMENTS}" "${FBCON}" "${VIDEO}")
 	echo "${BOOT_CFG_PARA}" >${BOOT_CFG}
 	export BOOT_CFG_PARA="${BOOT_CFG_PARA}"
 	echo "default frzr.conf" >${MOUNT_PATH}/boot/loader/loader.conf
