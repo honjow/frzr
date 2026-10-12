@@ -89,3 +89,7 @@ check 'should select all deployments which are not active and will not become ac
 rm -rf "${base}"
 
 echo
+
+echo "== installer safety regression tests"
+echo "Cross-repo protocol tests require INSTALL_MEDIA_ROOT; otherwise three tests are explicitly skipped."
+python3 -m unittest discover -s safety -v
