@@ -84,7 +84,7 @@ check 'should return empty if a valid deployment to delete is not found (one oth
 
 mkdir "${base}/deployments/1_a"
 mkdir "${base}/deployments/2_a"
-check 'should select a single deployment which is not active and will not become active on next boot (three other deployments, one which is in config)' $(get_deployment_to_delete '3_a' "${base}/config/boot.cfg" "${base}/deployments") '1_a'
+check 'should select all deployments which are not active and will not become active on next boot (three other deployments, one which is in config)' "$(get_deployment_to_delete '3_a' "${base}/config/boot.cfg" "${base}/deployments")" $'1_a\n2_a'
 
 rm -rf "${base}"
 
