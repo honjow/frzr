@@ -462,51 +462,68 @@ download_file() {
 		aria2c_cs_args="--checksum=sha-256=${checksum}"
 	fi
 
+	# Bound stalled transfers, not total duration of a large healthy download.
+	local transfer_status=0
 	if command -v aria2c >/dev/null 2>&1; then
 		if [ "${FRZR_STEAM_PROGRESS:-0}" -eq 1 ]; then
-			aria2c --connect-timeout=15 --file-allocation=none -x 16 -s 16 \
+			aria2c --connect-timeout=15 --timeout=120 --lowest-speed-limit=1 --max-tries=3 --retry-wait=2 --file-allocation=none -x 16 -s 16 \
 				${aria2c_cs_args} --auto-file-renaming=false --allow-overwrite=true \
 				--console-log-level=warn --stderr=true -o "${output_name}" -d "${output_dir}" "${url}" 2>&1 |
 				grep --line-buffered -oP '\d+(?=%)' | clean_progress_loop 91 $ser $total %
+				transfer_status=${PIPESTATUS[0]}
 		elif [ -z ${SHOW_UI+x} ] || [ -z ${SHOW_UI} ]; then
 			echo "downloading ${output_name}..." >&2
 			if [ -t 1 ]; then
-				aria2c --connect-timeout=15 --file-allocation=none -x 16 -s 16 \
+				aria2c --connect-timeout=15 --timeout=120 --lowest-speed-limit=1 --max-tries=3 --retry-wait=2 --file-allocation=none -x 16 -s 16 \
 					${aria2c_cs_args} --auto-file-renaming=false --allow-overwrite=true \
 					--console-log-level=warn -o "${output_name}" -d "${output_dir}" "${url}" >&2
+					transfer_status=${PIPESTATUS[0]}
 			else
-				aria2c --connect-timeout=15 --file-allocation=none -x 16 -s 16 \
+				aria2c --connect-timeout=15 --timeout=120 --lowest-speed-limit=1 --max-tries=3 --retry-wait=2 --file-allocation=none -x 16 -s 16 \
 					${aria2c_cs_args} --auto-file-renaming=false --allow-overwrite=true \
 					--console-log-level=warn --stderr=true -o "${output_name}" -d "${output_dir}" "${url}" 2>&1 |
 					stdbuf -oL tr '\r' '\n' >&2
+					transfer_status=${PIPESTATUS[0]}
 			fi
 		else
-			aria2c --connect-timeout=15 --file-allocation=none -x 16 -s 16 \
+			aria2c --connect-timeout=15 --timeout=120 --lowest-speed-limit=1 --max-tries=3 --retry-wait=2 --file-allocation=none -x 16 -s 16 \
 				${aria2c_cs_args} --auto-file-renaming=false --allow-overwrite=true \
 				--console-log-level=warn --stderr=true -o "${output_name}" -d "${output_dir}" "${url}" 2>&1 |
 				grep --line-buffered -oP '\d+(?=%)' | clean_progress_loop 100 $ser $total |
 				whiptail --gauge "$label" 10 50 0 3>&1 1>&2 2>&3
+				transfer_status=${PIPESTATUS[0]}
 		fi
 	else
 		if [ "${FRZR_STEAM_PROGRESS:-0}" -eq 1 ]; then
-			curl --connect-timeout 15 --http1.1 -# -L -o "${output_path}" -C - "${url}" 2>&1 |
+			curl --connect-timeout 15 --speed-limit 1 --speed-time 120 --retry 2 --retry-delay 2 --fail --http1.1 -# -L -o "${output_path}" -C - "${url}" 2>&1 |
 				stdbuf -oL tr '\r' '\n' | grep --line-buffered -oP '[0-9]*+(?=.[0-9])' |
 				clean_progress_loop 91 $ser $total %
+				transfer_status=${PIPESTATUS[0]}
 		elif [ -z ${SHOW_UI+x} ] || [ -z ${SHOW_UI} ]; then
 			echo "downloading ${output_name}..." >&2
 			if [ -t 1 ]; then
-				curl --connect-timeout 15 --http1.1 -L -o "${output_path}" -C - "${url}" >&2
+				curl --connect-timeout 15 --speed-limit 1 --speed-time 120 --retry 2 --retry-delay 2 --fail --http1.1 -L -o "${output_path}" -C - "${url}" >&2
+				transfer_status=${PIPESTATUS[0]}
 			else
-				curl --connect-timeout 15 --http1.1 -# -L -o "${output_path}" -C - "${url}" 2>&1 |
+				curl --connect-timeout 15 --speed-limit 1 --speed-time 120 --retry 2 --retry-delay 2 --fail --http1.1 -# -L -o "${output_path}" -C - "${url}" 2>&1 |
 					stdbuf -oL tr '\r' '\n' >&2
+					transfer_status=${PIPESTATUS[0]}
 			fi
 		else
-			curl --connect-timeout 15 --http1.1 -# -L -o "${output_path}" -C - "${url}" 2>&1 |
+			curl --connect-timeout 15 --speed-limit 1 --speed-time 120 --retry 2 --retry-delay 2 --fail --http1.1 -# -L -o "${output_path}" -C - "${url}" 2>&1 |
 				stdbuf -oL tr '\r' '\n' | grep --line-buffered -oP '[0-9]*+(?=.[0-9])' |
 				clean_progress_loop 100 $ser $total |
 				whiptail --gauge "$label" 10 50 0 3>&1 1>&2 2>&3
+				transfer_status=${PIPESTATUS[0]}
 		fi
-	fi
+	fi || transfer_status=$?
+
+    # Callers often use `if download_file`; errexit is disabled in that context.
+    # A partial file is never proof of success, even without a checksum.
+    if [ "$transfer_status" -ne 0 ]; then
+        echo "Download failed: ${output_name} (transfer status ${transfer_status})" >&2
+        return 1
+    fi
 
 	if [ ! -f "$output_path" ]; then
 		echo "Download failed: ${output_name}" >&2
@@ -595,12 +612,15 @@ get_fallback_url_justlist() {
 	fallback_api_url="${fallback_base}/api/get/list/Cloud189/img/"
 	fallback_file_url="${fallback_base}/file/Cloud189/img/"
 
-	local fallback_url=$(curl --http1.1 -L -s "${base_url}/fallback_url.txt")
+	local fallback_url
+    if ! fallback_url=$(curl --http1.1 -L -fsS --connect-timeout 10 --max-time 30 --retry 1 --retry-delay 2 "${base_url}/fallback_url.txt"); then
+        fallback_url="Not Found"
+    fi
 	# if fallback_url.txt contains "Not Found"
 	if echo "$fallback_url" | grep -q "Not Found"; then
 		fallback_url=""
 		# get the fallback url from the fallback api
-		file_info=$(curl --http1.1 -L -s -d "{}" -H "Content-Type:application/json" "${fallback_api_url}${img_file_name}")
+		file_info=$(curl --http1.1 -L -fsS --connect-timeout 10 --max-time 30 --retry 1 --retry-delay 2 -d "{}" -H "Content-Type:application/json" "${fallback_api_url}${img_file_name}") || return 1
 		if [[ -n "$file_info" ]]; then
 			fallback_file_id=$(echo "$file_info" | jq -r '.msg | first | .fileId' 2>/dev/null)
 			fallback_user=$(echo "$file_info" | jq -r '.msg | first | .user' 2>/dev/null)

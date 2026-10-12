@@ -1,4 +1,5 @@
 #! /bin/bash
+# FRZR_INSTALLER_PROTOCOL=1
 # shellcheck disable=SC2155,SC2001
 
 set -xe
@@ -48,8 +49,7 @@ echo "[DEBUG] IS_NONINTERACTIVE=$IS_NONINTERACTIVE" >&2
 
 # 全局变量
 MOUNT_PATH=/tmp/frzr_root
-umount ${MOUNT_PATH}/boot/ || true
-umount ${MOUNT_PATH}/ || true
+# Mount changes are deferred until layout validation and an execution boundary.
 
 # 全局变量，用于记录释放空间位置（扇区单位）
 FREE_SPACE_START_SECTORS=""
@@ -150,81 +150,159 @@ function select_disk() {
 			device_list+=("$model ($size)")
 		done <<<"$device_output"
 
-		DISK=$(whiptail --menu "选择要安装到的磁盘:" 20 50 5 "${device_list[@]}" 3>&1 1>&2 2>&3)
+		DISK=$(whiptail --menu "选择要安装到的磁盘:" 20 50 5 "${device_list[@]}" 3>&1 1>&2 2>&3) || return 130
 		echo "用户选择磁盘: $DISK"
 	fi
 }
 
+# Read-only bounded snapshot. Never interpret an observation failure as an empty disk.
+# Return codes: 0 complete, 1 none, 2 incomplete, 3 ambiguous, 4 unknown.
+function inspect_frzr_installation() {
+    FRZR_DETECTION_STATE=unknown
+    FRZR_PARTITIONS=()
+    FRZR_ROOT_PATH=""
+    FRZR_EFI_PATH=""
+    local snapshot line key value path type parent label uuid fs
+    local efi=0 root=0 home=0 foreign=0 suspicious=0 disk_seen=0
+    local -A seen_uuids=() seen_paths=()
+    if ! snapshot=$(timeout 15s lsblk --pairs --paths --output PATH,TYPE,PKNAME,LABEL,PARTUUID,FSTYPE); then
+        echo "[ERROR] Cannot inspect disks; installation refused" >&2
+        return 4
+    fi
+    [ -n "$snapshot" ] || return 4
+    while IFS= read -r line; do
+        path="" type="" parent="" label="" uuid="" fs=""
+        for key in PATH TYPE PKNAME LABEL PARTUUID FSTYPE; do
+            local pattern="(^| )${key}=\"([^\"]*)\""
+            [[ $line =~ $pattern ]] || return 4
+            value=${BASH_REMATCH[2]}
+            case "$key" in
+                PATH) path=$value;; TYPE) type=$value;; PKNAME) parent=$value;;
+                LABEL) label=$value;; PARTUUID) uuid=$value;; FSTYPE) fs=$value;;
+            esac
+        done
+        if [ "$path" = "$DISK" ] && [ "$type" = disk ]; then disk_seen=$((disk_seen + 1)); fi
+        # Similar labels must never masquerade as a repairable frzr installation.
+        case "$label" in
+            frzr_efi|frzr_root|frzr_home) ;;
+            *frzr*) suspicious=$((suspicious + 1)); continue;;
+            *) continue;;
+        esac
+        if [ "$parent" != "$DISK" ]; then foreign=$((foreign + 1)); continue; fi
+        if [ "$type" != part ] || [[ ! $path =~ ^/dev/[a-zA-Z0-9._/-]+$ ]] ||
+           [[ ! $uuid =~ ^[a-zA-Z0-9-]+$ ]]; then
+            suspicious=$((suspicious + 1)); continue
+        fi
+        if [ -n "${seen_uuids[$uuid]:-}" ] || [ -n "${seen_paths[$path]:-}" ]; then suspicious=$((suspicious + 1)); fi
+        seen_uuids[$uuid]=1; seen_paths[$path]=1
+        FRZR_PARTITIONS+=("$path|$uuid")
+        case "$label" in
+            frzr_efi) efi=$((efi + 1)); FRZR_EFI_PATH=$path; [ "$fs" = vfat ] || suspicious=$((suspicious + 1));;
+            frzr_root) root=$((root + 1)); FRZR_ROOT_PATH=$path; [ "$fs" = btrfs ] || suspicious=$((suspicious + 1));;
+            frzr_home) home=$((home + 1)); [ "$fs" = btrfs ] || suspicious=$((suspicious + 1));;
+        esac
+    done <<< "$snapshot"
+    [ "$disk_seen" -eq 1 ] || return 4
+    if [ "$efi" -gt 1 ] || [ "$root" -gt 1 ] || [ "$home" -gt 1 ] ||
+       [ "$foreign" -gt 0 ] || [ "$suspicious" -gt 0 ]; then
+        FRZR_DETECTION_STATE=ambiguous; return 3
+    elif [ "$efi" -eq 1 ] && [ "$root" -eq 1 ]; then
+        FRZR_DETECTION_STATE=complete; return 0
+    elif [ "$efi" -gt 0 ] || [ "$root" -gt 0 ] || [ "$home" -gt 0 ]; then
+        FRZR_DETECTION_STATE=incomplete; return 2
+    fi
+    FRZR_DETECTION_STATE=none
+    return 1
+}
+
+function frzr_checkpoint() {
+    local stage="$1"
+    echo "@@FRZR_STAGE $stage safe" >&2
+    if [ -n "${FRZR_CANCEL_FILE:-}" ] && [ -e "$FRZR_CANCEL_FILE" ]; then
+        echo "[CANCELLED] Stopped at safe boundary: $stage" >&2
+        exit 130
+    fi
+}
+
+function frzr_require_unused_mount_path() {
+    local targets target
+    if ! targets=$(timeout 15s findmnt -rn -o TARGET); then
+        echo "[ERROR] Cannot inspect mount occupancy" >&2
+        return 4
+    fi
+    [ -n "$targets" ] && [ -n "${MOUNT_PATH:-}" ] || return 4
+    while IFS= read -r target; do
+        case "$target" in
+            "$MOUNT_PATH"|"$MOUNT_PATH"/*)
+                echo "[ERROR] Installer mount path is already in use: $target; refusing to unmount or overwrite it" >&2
+                return 4;;
+        esac
+    done <<< "$targets"
+}
+
+function frzr_protected_stage() {
+    frzr_checkpoint "$1"
+    if [ "$1" != cleanup ]; then
+        frzr_require_unused_mount_path || exit 4
+    fi
+    echo "@@FRZR_STAGE $1 protected" >&2
+}
+
 function check_existing_installation() {
-	local has_efi=$(lsblk -o label "${DISK}" | grep -c "frzr_efi" 2>/dev/null || echo "0")
-	local has_root=$(lsblk -o label "${DISK}" | grep -c "frzr_root" 2>/dev/null || echo "0")
-	
-	if [ "$has_efi" -gt 0 ] && [ "$has_root" -gt 0 ]; then
-		echo "检测到完整的frzr安装 (EFI: $has_efi, Root: $has_root)"
-		return 0
-	elif [ "$has_efi" -gt 0 ] || [ "$has_root" -gt 0 ]; then
-		echo "检测到不完整的frzr安装残留 (EFI: $has_efi, Root: $has_root)"
-		
-		# 在非交互模式下，自动清理残留分区
-		if [ "$IS_NONINTERACTIVE" = true ]; then
-			echo "[NONINTERACTIVE] Auto-cleaning incomplete installation remnants"
-			cleanup_incomplete_installation
-			echo "残留分区已清理，当作新安装处理"
-			return 1
-		fi
-		
-		# 显示清理选项
-		if whiptail --yesno \
-			"检测到不完整的frzr安装残留：\n• frzr_efi 分区: $has_efi 个\n• frzr_root 分区: $has_root 个\n\n这可能是之前安装失败的结果。\n建议清理残留分区后重新安装。\n\n是否清理残留分区？" \
-			14 70 3>&1 1>&2 2>&3; then
-			cleanup_incomplete_installation
-			echo "残留分区已清理，当作新安装处理"
-		else
-			echo "用户选择保留残留分区，当作现有安装处理"
-			return 0
-		fi
-		return 1  # 清理后当作"无现有安装"
-	else
-		echo "未检测到现有frzr安装"
-		return 1
-	fi
+    local status=0
+    inspect_frzr_installation || status=$?
+    echo "[DETECTION] $DISK: $FRZR_DETECTION_STATE" >&2
+    case "$status" in
+        0|1) return "$status";;
+        2)
+            # Cleanup is a separate explicit disk + partition identity authorization.
+            # Old callers and interactive users without such a plan stop here.
+            if [ "${FRZR_CLEANUP_DISK:-}" = "$DISK" ] && [ -n "${FRZR_CLEANUP_PARTITIONS:-}" ]; then
+                cleanup_incomplete_installation || return 4
+                return 1
+            fi
+            echo "[ERROR] Incomplete installation may contain user data; explicit cleanup scope required" >&2
+            return 2;;
+        *) echo "[ERROR] Unknown or ambiguous layout; no partition changes allowed" >&2; return "$status";;
+    esac
 }
 
 function cleanup_incomplete_installation() {
-	echo "清理不完整的frzr安装..."
-	
-	# 获取所有frzr相关分区
-	local frzr_partitions=$(lsblk -rno "path,label" "${DISK}" | awk '$2 ~ /^frzr_/ {print $1}')
-	
-	if [ -n "$frzr_partitions" ]; then
-		echo "发现以下frzr分区："
-		echo "$frzr_partitions"
-		
-		echo "$frzr_partitions" | while read -r partition; do
-			if [ -n "$partition" ]; then
-				local part_num=$(echo "$partition" | sed 's/.*[^0-9]\([0-9]\+\)$/\1/')
-				echo "删除分区: $partition (分区号: $part_num)"
-				
-				# 卸载分区
-				umount "$partition" 2>/dev/null || true
-				
-				# 删除分区
-				if parted "$DISK" rm "$part_num" 2>/dev/null; then
-					echo "已删除分区: $partition"
-				else
-					echo "删除分区失败: $partition"
-				fi
-			fi
-		done
-		
-		# 刷新分区表
-		partprobe "$DISK"
-		sleep 2
-		
-		echo "frzr残留分区清理完成"
-	else
-		echo "未找到需要清理的frzr分区"
-	fi
+    local status=0 expected entry path uuid number prefix
+    [ "${FRZR_CLEANUP_DISK:-}" = "$DISK" ] || return 4
+    inspect_frzr_installation || status=$?
+    [ "$status" -eq 2 ] || return 4
+    expected=$(printf '%s\n' "${FRZR_PARTITIONS[@]}" | LC_ALL=C sort)
+    # Exact set, identities and disk binding; no wildcards and no implicit home deletion.
+    [ -n "$expected" ] && [ "$expected" = "$(printf '%s\n' "${FRZR_CLEANUP_PARTITIONS:-}" | LC_ALL=C sort)" ] || return 4
+    local numbers=()
+    for entry in "${FRZR_PARTITIONS[@]}"; do
+        path=${entry%%|*}; uuid=${entry#*|}
+        prefix=$DISK
+        [[ $DISK =~ [0-9]$ ]] && prefix="${DISK}p"
+        number=${path#"$prefix"}
+        [[ "$path" = "$prefix$number" && "$number" =~ ^[1-9][0-9]*$ ]] || return 4
+        numbers+=("$number")
+    done
+    frzr_protected_stage cleanup
+    for number in "${numbers[@]}"; do
+        path="${DISK}$number"; [[ $DISK =~ [0-9]$ ]] && path="${DISK}p$number"
+        # A failed unmount or deletion must never be reported as successful cleanup.
+        local mount_status=0
+        findmnt -rn -S "$path" >/dev/null || mount_status=$?
+        case "$mount_status" in
+            0) umount "$path" || return 4;;
+            1) ;; # documented no-match status
+            *) return 4;;
+        esac
+        parted -s "$DISK" rm "$number" || return 4
+    done
+    partprobe "$DISK" || return 4
+    status=0
+    inspect_frzr_installation || status=$?
+    [ "$status" -eq 1 ] || return 4
+    frzr_checkpoint cleanup_complete
+    return 0
 }
 
 function choose_repair_or_reinstall() {
@@ -245,10 +323,11 @@ function choose_repair_or_reinstall() {
 	fi
 	echo "[DEBUG] Showing whiptail dialog" >&2
 	
-	local choice=$(whiptail --menu "检测到现有的frzr安装，请选择操作:" 15 70 3 \
+	local choice
+	choice=$(whiptail --menu "检测到现有的frzr安装，请选择操作:" 15 70 3 \
 		"repair" "修复安装 - 保留用户数据，修复引导和系统文件" \
 		"reinstall" "重新安装 - 进入安装选项，可选择全新安装或双系统安装" \
-		3>&1 1>&2 2>&3)
+		3>&1 1>&2 2>&3) || return 130
 
 	case "$choice" in
 	"repair")
@@ -257,7 +336,7 @@ function choose_repair_or_reinstall() {
 	"reinstall")
 		echo "reinstall"
 		;;
-	"*")
+	*)
 		echo "cancel"
 		;;
 	esac
@@ -277,14 +356,13 @@ function choose_install_type() {
 		show_system_info
 
 		# 显示安装类型选择
-		local install_type=$(whiptail --menu "选择安装类型:" 15 60 2 \
+		local install_type
+		if ! install_type=$(whiptail --menu "选择安装类型:" 15 60 2 \
 			"fresh" "全新安装 (格式化整个磁盘)" \
 			"dual" "双系统安装 (保留现有系统)" \
-			3>&1 1>&2 2>&3)
-
-		if [ $? -ne 0 ]; then
-			echo "安装已取消"
-			exit 1
+			3>&1 1>&2 2>&3); then
+			echo "安装已取消" >&2
+			return 130
 		fi
 
 		echo "$install_type"
@@ -296,9 +374,11 @@ function choose_install_type() {
 function repair_install() {
 	echo "=== 修复安装模式 ==="
 
+    inspect_frzr_installation || return 4
+    INSTALL_MOUNT=$FRZR_ROOT_PATH
+    BOOT_EFI=$FRZR_EFI_PATH
+    frzr_protected_stage repair
 	mkdir -p "${MOUNT_PATH}"
-	INSTALL_MOUNT=$(lsblk -rno "path,label" "${DISK}" | grep "frzr_root" | awk '{print $1}')
-	BOOT_EFI=$(lsblk -rno "path,label" "${DISK}" | grep "frzr_efi" | awk '{print $1}')
 	mount "${INSTALL_MOUNT}" "${MOUNT_PATH}"
 	mount -t vfat "${BOOT_EFI}" "${MOUNT_PATH}/boot/"
 	rm -rf "${MOUNT_PATH:?}/boot/"*
@@ -329,6 +409,7 @@ function fresh_install() {
 
 	USERNAME=${username:-gamer}
 
+	frzr_protected_stage fresh
 	mkdir -p ${MOUNT_PATH}
 
 	# create partition table and create and mount the btrfs filesystem
@@ -424,6 +505,8 @@ function filter_usable_free_spaces() {
 }
 
 function select_free_space() {
+	SELECTED_FREE_SPACE_START_SECTORS=""
+	SELECTED_FREE_SPACE_END_SECTORS=""
 	local usable_spaces=()
 
 	# 读取所有可用的空闲空间
@@ -453,15 +536,19 @@ function select_free_space() {
 			return 0
 		fi
 		
-		local selected=$(whiptail --menu "选择要使用的空闲空间:" 15 60 5 \
-			"${usable_spaces[@]}" 3>&1 1>&2 2>&3)
-
-		if [ $? -eq 0 ]; then
+		local selected
+		if selected=$(whiptail --menu "选择要使用的空闲空间:" 15 60 5 \
+			"${usable_spaces[@]}" 3>&1 1>&2 2>&3); then
+            local valid=false candidate
+            for candidate in "${usable_spaces[@]}"; do
+                if [ "$selected" = "$candidate" ] && [[ "$selected" =~ ^[0-9]+-[0-9]+$ ]]; then valid=true; fi
+            done
+            [ "$valid" = true ] || return 130
 			SELECTED_FREE_SPACE_START_SECTORS=$(echo "$selected" | cut -d'-' -f1)
 			SELECTED_FREE_SPACE_END_SECTORS=$(echo "$selected" | cut -d'-' -f2)
 			return 0
 		else
-			return 1
+			return 130
 		fi
 	fi
 }
@@ -479,7 +566,10 @@ function get_free_space_boundaries() {
 }
 
 function check_unallocated_space() {
-	if select_free_space; then
+	local status=0
+	select_free_space || status=$?
+	[ "$status" -ne 130 ] || exit 130
+	if [ "$status" -eq 0 ]; then
 		local size_mib=$(sectors_to_mib $((SELECTED_FREE_SPACE_END_SECTORS - SELECTED_FREE_SPACE_START_SECTORS)))
 		local size_gib=$((size_mib / 1024))
 		local start_mib=$(sectors_to_mib "$SELECTED_FREE_SPACE_START_SECTORS")
@@ -1066,6 +1156,7 @@ function dual_boot_install() {
 
 	echo "=== 双系统安装模式 ==="
 	
+	frzr_protected_stage dual
 	# 检测和显示现有系统
 	detect_existing_systems
 	show_system_info
@@ -1174,7 +1265,8 @@ function handle_installation_choice() {
 	echo >&2 "handle_installation_choice username: $username, install_type: $install_type"
 
 	# 选择安装类型
-	local chosen_type=$(choose_install_type "$install_type")
+	local chosen_type
+	chosen_type=$(choose_install_type "$install_type") || return $?
 	case "$chosen_type" in
 	"fresh")
 		echo "全新安装" >&2
@@ -1216,12 +1308,19 @@ function main() {
 	fi
 
 	# 1. 选择磁盘
-	select_disk "$disk"
+	frzr_checkpoint preflight
+	select_disk "$disk" || return $?
 
 	# 2. 检查现有安装
-	if check_existing_installation; then
+	local detection_status=0
+	check_existing_installation || detection_status=$?
+	if [ "$detection_status" -gt 1 ]; then
+		return "$detection_status"
+	fi
+	if [ "$detection_status" -eq 0 ]; then
 		# 现有frzr安装 - 修复或重新安装
-		local choice=$(choose_repair_or_reinstall "$install_type")
+		local choice
+		choice=$(choose_repair_or_reinstall "$install_type") || return $?
 		case "$choice" in
 		"repair")
 			repair_install
@@ -1243,3 +1342,4 @@ function main() {
 
 # 执行主流程
 main "$1" "$2" "$3"
+frzr_checkpoint bootstrap_complete
